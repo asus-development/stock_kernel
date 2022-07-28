@@ -56,8 +56,9 @@ int check_pa_temp(void){
   int result = 0;
   bool cur_use_pa_status = 0;
   cur_use_pa_status = G_use_pa_flag;
-	if(G_pa_therm1_temp < 30000){
+	if(G_pa_therm1_temp < 33000){
 		result = (G_pa_therm1_temp - 1000);
+		return result;
 	}
 	//if(G_pa_therm1_temp > 35000){
 	if(G_pa_therm1_temp > (G_skin_therm_temp - 3000)){
@@ -88,7 +89,7 @@ temp_show(struct device *dev, struct device_attribute *attr, char *buf)
 	if (ret)
 		return ret;
 	
-	if(tz->id == 72){
+	if(tz->id == 79){
 		G_virtual_therm_temp_prev = G_virtual_therm_temp;
 		temperature = check_pa_temp();
 		G_virtual_therm_temp = smooth_virtual_therm_temp(temperature);

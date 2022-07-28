@@ -25,9 +25,10 @@
 #define to_drm_minor(d) dev_get_drvdata(d)
 #define to_drm_connector(d) dev_get_drvdata(d)
 
-extern void asus_lcd_cabc_off_locking(void);
-extern void asus_lcd_cabc_restore(void);
+extern void asus_lcd_cabc_set(int mode);
+extern int asus_lcd_cabc_get(void);
 static int gHDRMode = 0;
+static int gLastCABCMode = 0;
 static int gColorMode = 0;
 
 /**
@@ -75,11 +76,12 @@ static ssize_t hdr_mode_store(struct class *class,
 
 	if (!strncmp(buf, "1", 1)) {
 		printk("[Display] store HDR mode 1\n");
-		asus_lcd_cabc_off_locking();
+		gLastCABCMode = asus_lcd_cabc_get();
+		asus_lcd_cabc_set(0);
 		gHDRMode = 1;
 	} else if (!strncmp(buf, "0", 1)) {
 		printk("[Display] store HDR mode 0\n");
-		asus_lcd_cabc_restore();
+		asus_lcd_cabc_set(gLastCABCMode);
 		gHDRMode = 0;
 	} else {
 		printk("[Display] unknown HDR mode\n");

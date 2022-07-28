@@ -70,19 +70,6 @@ struct msm_rpmstats_kobj_attr {
 	struct kobj_attribute ka;
 	struct msm_rpmstats_platform_data *pd;
 };
-/* This table is subject to change, better confirm with QCT for your chipset version */
-static char *subsystem_names[] = {
-    "APPS",
-    "SP",
-    "AUDIO",
-    "SENSORS",
-    "AOP",
-    "DEBUG",
-    "GPU",
-    "DISPLAY",
-    "COMPUTE",
-    "MODEM"
-};
 
 static inline u64 get_time_in_sec(u64 counter)
 {
@@ -386,16 +373,6 @@ static int rpm_stats_suspend(struct device *dev)
 		memcpy(stat_type, &data.stat_type, sizeof(u32));
 		printk("[RPM] Suspend: status: Mode: %s, Count: %d\n", stat_type, data.count);
 	}
-	data.count = msm_rpmstats_read_long_register(reg,
-		3, offsetof(struct msm_rpm_stats_data, count));
-	data.last_entered_at = msm_rpmstats_read_quad_register(reg,
-		3, offsetof(struct msm_rpm_stats_data, last_entered_at));
-	data.last_exited_at = msm_rpmstats_read_quad_register(reg,
-		3, offsetof(struct msm_rpm_stats_data, last_exited_at));
-	data.accumulated = msm_rpmstats_read_quad_register(reg,
-		3, offsetof(struct msm_rpm_stats_data, accumulated));
-	printk("[RPM] Suspend: count:%d, mask:0x%llx, status(enter):0x%llx, status(exit):0x%llx\n",
-		data.count, data.accumulated, data.last_entered_at, data.last_exited_at);
 
 	iounmap(reg);
 	return 0;
@@ -406,8 +383,7 @@ static int rpm_stats_resume(struct device *dev)
 	void __iomem *reg =0;
 	struct msm_rpm_stats_data data;
 	char stat_type[5];
-	int i,j;
-	u32 aop_block_ss = 0;
+	int i;
 	stat_type[4] = 0;
 
 	reg = ioremap_nocache(g_phys_addr_base, g_phys_size);
@@ -422,22 +398,6 @@ static int rpm_stats_resume(struct device *dev)
 				offsetof(struct msm_rpm_stats_data, count));
 		memcpy(stat_type, &data.stat_type, sizeof(u32));
 		printk("[RPM] Resume: status: Mode: %s, Count: %d\n", stat_type, data.count);
-	}
-	data.count = msm_rpmstats_read_long_register(reg,
-		3, offsetof(struct msm_rpm_stats_data, count));
-	data.last_entered_at = msm_rpmstats_read_quad_register(reg,
-		3, offsetof(struct msm_rpm_stats_data, last_entered_at));
-	data.last_exited_at = msm_rpmstats_read_quad_register(reg,
-		3, offsetof(struct msm_rpm_stats_data, last_exited_at));
-	data.accumulated = msm_rpmstats_read_quad_register(reg,
-		3, offsetof(struct msm_rpm_stats_data, accumulated));
-	printk("[RPM] Resume: count:%d, mask:0x%llx, status(enter):0x%llx, status(exit):0x%llx\n",
-		data.count, data.accumulated, data.last_entered_at, data.last_exited_at);
-	/* Only check the last 10-bit that both are 0 */
-	aop_block_ss = ((~(data.accumulated & 0x3ff)) & (~(data.last_entered_at & 0x3ff))) & 0x3ff;
-	for (j = 0; j < ARRAY_SIZE(subsystem_names); j++) {
-		if(aop_block_ss & (0x1 << j))
-			printk("[RPM] blocking aosd susbsystem:%s\n",subsystem_names[j]);
 	}
 
 	iounmap(reg);

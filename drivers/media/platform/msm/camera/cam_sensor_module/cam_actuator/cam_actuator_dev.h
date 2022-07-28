@@ -1,4 +1,4 @@
-/* Copyright (c) 2017-2018, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2017-2019, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -34,6 +34,7 @@
 #include "cam_sensor_util.h"
 #include "cam_soc_util.h"
 #include "cam_debug_util.h"
+#include "cam_context.h"
 
 #define NUM_MASTERS 2
 #define NUM_QUEUES 2
@@ -74,7 +75,7 @@ struct cam_actuator_soc_private {
 	struct cam_actuator_i2c_info_t i2c_info;
 	struct cam_sensor_power_ctrl_t power_info;
 };
-// ASUS_BSP +++
+
 /**
  * struct intf_params
  * @device_hdl: Device Handle
@@ -89,9 +90,10 @@ struct cam_actuator_intf_params {
 	struct cam_req_mgr_kmd_ops ops;
 	struct cam_req_mgr_crm_cb *crm_cb;
 };
-//ASUS_BSP ---
+
 /**
  * struct cam_actuator_ctrl_t
+ * @device_name: Device name
  * @i2c_driver: I2C device info
  * @pdev: Platform device
  * @cci_i2c_master: I2C structure
@@ -107,7 +109,6 @@ struct cam_actuator_intf_params {
  * @i2c_data: I2C register settings structure
  * @act_info: Sensor query cap structure
  * @of_node: Node ptr
- * @device_name: Device name
  * @last_flush_req: Last request to flush
  */
 struct cam_actuator_ctrl_t {

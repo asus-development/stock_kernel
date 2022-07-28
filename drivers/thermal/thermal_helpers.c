@@ -153,6 +153,8 @@ void thermal_zone_set_trips(struct thermal_zone_device *tz)
 	 * Set a temperature window. When this window is left the driver
 	 * must inform the thermal core via thermal_zone_device_update.
 	 */
+	 
+	/* ASUS BSP Clay: remove ambigous log when thermal is stable +++ */
 	 /* Skip lmh-dcvs-00 & 01 since these nodes are not monitor on-die sensor */
 	if(!strcmp(tz->type, "lmh-dcvs-00")){
 		dev_dbg(&tz->device, "Thermal: Skip set_trip!!!");
@@ -163,6 +165,7 @@ void thermal_zone_set_trips(struct thermal_zone_device *tz)
 		if (ret)
 			dev_err(&tz->device, "Failed to set trips: %d\n", ret);
 	}
+	/* ASUS BSP Clay: remove ambigous log when thermal is stable --- */
 	trace_thermal_set_trip(tz);
 
 exit:

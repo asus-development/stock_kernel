@@ -644,8 +644,6 @@ int MSP430FR2311_Get_Version(char * version) {
 	return 0;
 }
 
-#define MCU_SHOW_INFO_IN_SETTING
-#ifdef MCU_SHOW_INFO_IN_SETTING
 #include "../power/supply/qcom/fg-core.h"
 #include "../power/supply/qcom/fg-reg.h"
 #include "../power/supply/qcom/fg-alg.h"
@@ -670,7 +668,7 @@ void registerMCUVersion() {
 	sprintf(mcuVersion, "%d%02d%02d%02X",  gFWVersion[0],gFWVersion[1],gFWVersion[2],gFWVersion[3]);
 	asus_extcon_set_name(mcu_ver_extcon, mcuVersion);
 }
-#endif
+
 
 int MSP430FR2311_Check_Version(void) {
 	memset(gFWVersion, 0x0, sizeof(gFWVersion));
@@ -723,9 +721,8 @@ int MSP430FR2311_Check_Version(void) {
 				read_cali_file();
 			}
 
-#ifdef MCU_SHOW_INFO_IN_SETTING
 			registerMCUVersion();
-#endif			
+			
 		} else {
 			pr_err("[MCU] Firmware need to be updated\n"); 
 		}
@@ -1613,21 +1610,12 @@ static int MSP430FR2311_parse_dt(struct device *dev)
 }
 #endif
 
-extern bool g_Charger_mode;
-
 static int MSP430FR2311_probe(struct i2c_client *client,
 	const struct i2c_device_id *id)
 {
 	int ret = 0;
 
 pr_err("Randy MCU probe\n");
-
-	if (g_Charger_mode == 1) {
-		pr_err("Randy MCU probe, in charging mode, skip MCU probe\n");
-		
-			return -EBUSY;
-		}
-
 
 	mcu_info = kzalloc(sizeof(struct MSP430FR2311_info), GFP_KERNEL);
 	if (!mcu_info)

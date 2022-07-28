@@ -78,6 +78,24 @@
 			MCU,mcu5V_boost_enable-gpios = <&tlmm 79 0x00>;
 			MCU,mcuwakeup-gpios = <&tlmm 10 0x00>;
 			MCU,slave_address = <0x48>;
+	};
+};
+&vendor {
+        /* icm206xx +++++ */
+        icm206xx: qcom,icm206xx@0 {
+                cell-index = <0>;
+                reg = <0x68>;
+                compatible = "invn,icm20690";
+                cci-master = <1>;
+                cci-device = <0>;
+                icm206xx-supply = <&pm8150l_l7>;
+                cci-supply = <&pm8150l_l1>;
+                pinctrl-names = "cam_default", "cam_suspend";
+                pinctrl-0 = <&cam_icm_active>;
+                pinctrl-1 = <&cam_icm_suspend>;
+                invn,gpio-int = <&tlmm 131 1>;
+                invn,use-interrupt;
+                invn,place = "Landscape Left Back Side";
         };
-
+        /* icm206xx ----- */
 };

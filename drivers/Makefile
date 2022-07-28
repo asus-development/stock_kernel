@@ -188,18 +188,15 @@ obj-$(CONFIG_TEE)		+= tee/
 obj-$(CONFIG_MULTIPLEXER)	+= mux/
 obj-$(CONFIG_SENSORS_SSC)	+= sensors/
 obj-$(CONFIG_ESOC)              += esoc/
-
-#Tuxera
-ifeq ($(ASUS_BUILD_PROJECT),ZS630KL)
-	ifdef CONFIG_TUXERA_USERDEBUG
-		obj-y				+= exfat/zs630kl/userdebug/
-	else
-		obj-y				+= exfat/zs630kl/user/
-	endif
-endif
-
-#randy mcu driver
-obj-y				+= msp/
-
 # GNSS driver
 obj-$(CONFIG_GNSS_SIRF)		+= gnsssirf/
+#randy mcu driver
+obj-y				+= msp/
+obj-$(CONFIG_GNSS)		+= gnss/
+
+#Tuxera
+ifdef CONFIG_TUXERA_USERDEBUG
+obj-y				+= exfat/zs630kl/userdebug/
+else
+obj-y				+= exfat/zs630kl/user/
+endif

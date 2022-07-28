@@ -336,7 +336,6 @@ static int usb_stor_control_thread(void * __us)
 			scsi_unlock(host);
 			mutex_unlock(&us->dev_mutex);
 			usb_stor_dbg(us, "-- exiting\n");
-			printk(KERN_INFO "[usb-storage] -- exiting\n");
 			break;
 		}
 
@@ -354,7 +353,6 @@ static int usb_stor_control_thread(void * __us)
 		 */
 		if (us->srb->sc_data_direction == DMA_BIDIRECTIONAL) {
 			usb_stor_dbg(us, "UNKNOWN data direction\n");
-			printk(KERN_ERR "[usb-storage] UNKNOWN data direction\n");
 			us->srb->result = DID_ERROR << 16;
 		}
 
@@ -367,17 +365,11 @@ static int usb_stor_control_thread(void * __us)
 			usb_stor_dbg(us, "Bad target number (%d:%llu)\n",
 				     us->srb->device->id,
 				     us->srb->device->lun);
-			printk(KERN_ERR "[usb-storage] Bad target number (%d:%llu)\n",
-				     us->srb->device->id,
-				     us->srb->device->lun);
 			us->srb->result = DID_BAD_TARGET << 16;
 		}
 
 		else if (us->srb->device->lun > us->max_lun) {
 			usb_stor_dbg(us, "Bad LUN (%d:%llu)\n",
-				     us->srb->device->id,
-				     us->srb->device->lun);
-			printk(KERN_ERR "[usb-storage] Bad LUN (%d:%llu)\n",
 				     us->srb->device->id,
 				     us->srb->device->lun);
 			us->srb->result = DID_BAD_TARGET << 16;
@@ -394,7 +386,6 @@ static int usb_stor_control_thread(void * __us)
 			    0x1F, 0x00, 0x00, 0x00};
 
 			usb_stor_dbg(us, "Faking INQUIRY command\n");
-			printk(KERN_ERR "[usb-storage] Faking INQUIRY command\n");
 			fill_inquiry_response(us, data_ptr, 36);
 			us->srb->result = SAM_STAT_GOOD;
 		}
@@ -413,7 +404,6 @@ static int usb_stor_control_thread(void * __us)
 		if (us->srb->result == DID_ABORT << 16) {
 SkipForAbort:
 			usb_stor_dbg(us, "scsi command aborted\n");
-			printk(KERN_ERR "[usb-storage] scsi command aborted: command timed out\n");
 			srb = NULL;	/* Don't call srb->scsi_done() */
 		}
 

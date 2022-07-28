@@ -198,6 +198,7 @@ enum {
 #define SHIP_MODE_EN_BIT			BIT(0)
 
 #define BATIF_ADC_CHANNEL_EN_REG		(BATIF_BASE + 0x82)
+#define IBATT_CHANNEL_EN_BIT			BIT(6)
 #define CONN_THM_CHANNEL_EN_BIT			BIT(4)
 #define DIE_TEMP_CHANNEL_EN_BIT			BIT(2)
 #define MISC_THM_CHANNEL_EN_BIT			BIT(1)
@@ -266,6 +267,13 @@ enum {
 #define IDLE_BIT				BIT(2)
 #define SINGLE_DECREMENT_BIT			BIT(1)
 #define SINGLE_INCREMENT_BIT			BIT(0)
+
+#define USBIN_ADAPTER_ALLOW_OVERRIDE_REG	(USBIN_BASE + 0x44)
+#define CONTINUOUS				BIT(3)
+#define FORCE_12V				BIT(2)
+#define FORCE_9V				BIT(1)
+#define FORCE_5V				BIT(0)
+#define FORCE_NULL				0
 
 #define USB_CMD_PULLDOWN_REG			(USBIN_BASE + 0x45)
 #define EN_PULLDOWN_USB_IN_BIT			BIT(0)
@@ -357,7 +365,10 @@ enum {
  *  TYPEC Peripheral Registers  *
  ********************************/
 #define TYPE_C_SNK_STATUS_REG			(TYPEC_BASE + 0x06)
-#define DETECTED_SRC_TYPE_MASK			GENMASK(3, 0)
+#define DETECTED_SRC_TYPE_MASK			GENMASK(6, 0)
+#define SNK_DAM_500MA_BIT			BIT(6)
+#define SNK_DAM_1500MA_BIT			BIT(5)
+#define SNK_DAM_3000MA_BIT			BIT(4)
 #define SNK_RP_STD_BIT				BIT(3)
 #define SNK_RP_1P5_BIT				BIT(2)
 #define SNK_RP_3P0_BIT				BIT(1)
@@ -505,6 +516,12 @@ enum {
 #define CONNECTOR_TEMP_RST_BIT			BIT(2)
 #define CONNECTOR_TEMP_UB_BIT			BIT(1)
 #define CONNECTOR_TEMP_LB_BIT			BIT(0)
+
+#define SMB_TEMP_STATUS_REG			(MISC_BASE + 0x0A)
+#define SMB_TEMP_SHDN_BIT			BIT(3)
+#define SMB_TEMP_RST_BIT			BIT(2)
+#define SMB_TEMP_UB_BIT				BIT(1)
+#define SMB_TEMP_LB_BIT				BIT(0)
 
 #define BARK_BITE_WDOG_PET_REG			(MISC_BASE + 0x43)
 #define BARK_BITE_WDOG_PET_BIT			BIT(0)

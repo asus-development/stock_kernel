@@ -18,7 +18,6 @@
 #include "cam_common_util.h"
 
 #include "asus_flash.h"
-
 #include <linux/workqueue.h>
 #include <linux/timer.h>
 
@@ -45,6 +44,7 @@ static int32_t cam_flash_driver_cmd(struct cam_flash_ctrl *fctrl,
 			cmd->handle_type);
 		return -EINVAL;
 	}
+
 	mutex_lock(&g_flash_mutex);
 	mutex_lock(&(fctrl->flash_mutex));
 	switch (cmd->op_code) {
@@ -421,7 +421,7 @@ static int cam_flash_subdev_close(struct v4l2_subdev *sd,
 	mutex_lock(&fctrl->flash_mutex);
 	cam_flash_shutdown(fctrl);
 	mutex_unlock(&fctrl->flash_mutex);
-
+	
 	asus_flash_set_camera_state(0);//ASUS_BSP Zhengwei "porting flash"
 	return 0;
 }
@@ -559,11 +559,9 @@ static int32_t cam_flash_platform_probe(struct platform_device *pdev)
 	mutex_init(&(fctrl->flash_mutex));
 
 	fctrl->flash_state = CAM_FLASH_STATE_INIT;
-
 	fctrl->ax_flash_type = CAMERA_SENSOR_FLASH_OP_OFF;
 	INIT_DELAYED_WORK(&fctrl->flash_off_work, cam_delay_flash_off);
 	asus_flash_init(fctrl);//ASUS_BSP Zhengwei "porting flash"
-
 	CAM_INFO(CAM_FLASH, "Flash probe succeed");
 	return rc;
 

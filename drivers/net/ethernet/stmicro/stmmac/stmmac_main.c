@@ -51,7 +51,7 @@
 #include <linux/of_mdio.h>
 #include "dwmac1000.h"
 
-#define	STMMAC_ALIGN(x)		__ALIGN_KERNEL(x, SMP_CACHE_BYTES)
+#define	STMMAC_ALIGN(x)		ALIGN(ALIGN(x, SMP_CACHE_BYTES), 16)
 #define	TSO_MAX_BUFF_SIZE	(SZ_16K - 1)
 
 /* Module parameters */
@@ -149,7 +149,8 @@ static void stmmac_disable_all_queues(struct stmmac_priv *priv)
 
 	for (queue = 0; queue < rx_queues_cnt; queue++) {
 		struct stmmac_rx_queue *rx_q = &priv->rx_queue[queue];
-
+		if (rx_q->skip_sw)
+			continue;
 		napi_disable(&rx_q->napi);
 	}
 }
@@ -165,7 +166,8 @@ static void stmmac_enable_all_queues(struct stmmac_priv *priv)
 
 	for (queue = 0; queue < rx_queues_cnt; queue++) {
 		struct stmmac_rx_queue *rx_q = &priv->rx_queue[queue];
-
+		if (rx_q->skip_sw)
+			continue;
 		napi_enable(&rx_q->napi);
 	}
 }
@@ -293,11 +295,8 @@ static inline u32 stmmac_rx_dirty(struct stmmac_priv *priv, u32 queue)
  */
 static inline void stmmac_hw_fix_mac_speed(struct stmmac_priv *priv)
 {
-	struct net_device *ndev = priv->dev;
-	struct phy_device *phydev = ndev->phydev;
-
 	if (likely(priv->plat->fix_mac_speed))
-		priv->plat->fix_mac_speed(priv->plat->bsp_priv, phydev->speed);
+		priv->plat->fix_mac_speed(priv->plat->bsp_priv, priv->speed);
 }
 
 /**
@@ -365,7 +364,6 @@ bool stmmac_eee_init(struct stmmac_priv *priv)
 {
 	struct net_device *ndev = priv->dev;
 	int interface = priv->plat->interface;
-	unsigned long flags;
 	bool ret = false;
 
 	if ((interface != PHY_INTERFACE_MODE_MII) &&
@@ -392,7 +390,7 @@ bool stmmac_eee_init(struct stmmac_priv *priv)
 			 * changed).
 			 * In that case the driver disable own timers.
 			 */
-			spin_lock_irqsave(&priv->lock, flags);
+			mutex_lock(&priv->lock);
 			if (priv->eee_active) {
 				netdev_dbg(priv->dev, "disable EEE\n");
 				del_timer_sync(&priv->eee_ctrl_timer);
@@ -400,11 +398,11 @@ bool stmmac_eee_init(struct stmmac_priv *priv)
 							     tx_lpi_timer);
 			}
 			priv->eee_active = 0;
-			spin_unlock_irqrestore(&priv->lock, flags);
+			mutex_unlock(&priv->lock);
 			goto out;
 		}
 		/* Activate the EEE and start timers */
-		spin_lock_irqsave(&priv->lock, flags);
+		mutex_lock(&priv->lock);
 		if (!priv->eee_active) {
 			priv->eee_active = 1;
 			setup_timer(&priv->eee_ctrl_timer,
@@ -421,7 +419,7 @@ bool stmmac_eee_init(struct stmmac_priv *priv)
 		priv->hw->mac->set_eee_pls(priv->hw, ndev->phydev->link);
 
 		ret = true;
-		spin_unlock_irqrestore(&priv->lock, flags);
+		mutex_unlock(&priv->lock);
 
 		netdev_dbg(priv->dev, "Energy-Efficient Ethernet initialized\n");
 	}
@@ -525,6 +523,7 @@ static int stmmac_hwtstamp_ioctl(struct net_device *dev, struct ifreq *ifr)
 	u32 snap_type_sel = 0;
 	u32 ts_master_en = 0;
 	u32 ts_event_en = 0;
+	u32 av_8021asm_en = 0;
 	u32 value = 0;
 	u32 sec_inc;
 
@@ -539,6 +538,13 @@ static int stmmac_hwtstamp_ioctl(struct net_device *dev, struct ifreq *ifr)
 	if (copy_from_user(&config, ifr->ifr_data,
 			   sizeof(struct hwtstamp_config)))
 		return -EFAULT;
+
+	if (qcom_ethqos_ipa_enabled() &&
+	    config.rx_filter == HWTSTAMP_FILTER_ALL) {
+		netdev_alert(priv->dev,
+			     "No hw timestamping since ipa is enabled\n");
+		return -EOPNOTSUPP;
+	}
 
 	netdev_dbg(priv->dev, "%s config flags:0x%x, tx_type:0x%x, rx_filter:0x%x\n",
 		   __func__, config.flags, config.tx_type, config.rx_filter);
@@ -562,9 +568,6 @@ static int stmmac_hwtstamp_ioctl(struct net_device *dev, struct ifreq *ifr)
 			/* PTP v1, UDP, any kind of event packet */
 			config.rx_filter = HWTSTAMP_FILTER_PTP_V1_L4_EVENT;
 			/* take time stamp for all event messages */
-			if (priv->plat->has_gmac4)
-				snap_type_sel = PTP_GMAC4_TCR_SNAPTYPSEL_1;
-			else
 				snap_type_sel = PTP_TCR_SNAPTYPSEL_1;
 
 			ptp_over_ipv4_udp = PTP_TCR_TSIPV4ENA;
@@ -597,9 +600,6 @@ static int stmmac_hwtstamp_ioctl(struct net_device *dev, struct ifreq *ifr)
 			config.rx_filter = HWTSTAMP_FILTER_PTP_V2_L4_EVENT;
 			ptp_v2 = PTP_TCR_TSVER2ENA;
 			/* take time stamp for all event messages */
-			if (priv->plat->has_gmac4)
-				snap_type_sel = PTP_GMAC4_TCR_SNAPTYPSEL_1;
-			else
 				snap_type_sel = PTP_TCR_SNAPTYPSEL_1;
 
 			ptp_over_ipv4_udp = PTP_TCR_TSIPV4ENA;
@@ -634,14 +634,12 @@ static int stmmac_hwtstamp_ioctl(struct net_device *dev, struct ifreq *ifr)
 			config.rx_filter = HWTSTAMP_FILTER_PTP_V2_EVENT;
 			ptp_v2 = PTP_TCR_TSVER2ENA;
 			/* take time stamp for all event messages */
-			if (priv->plat->has_gmac4)
-				snap_type_sel = PTP_GMAC4_TCR_SNAPTYPSEL_1;
-			else
 				snap_type_sel = PTP_TCR_SNAPTYPSEL_1;
 
 			ptp_over_ipv4_udp = PTP_TCR_TSIPV4ENA;
 			ptp_over_ipv6_udp = PTP_TCR_TSIPV6ENA;
 			ptp_over_ethernet = PTP_TCR_TSIPENA;
+			av_8021asm_en = PTP_TCR_AV8021ASMEN;
 			break;
 
 		case HWTSTAMP_FILTER_PTP_V2_SYNC:
@@ -654,6 +652,7 @@ static int stmmac_hwtstamp_ioctl(struct net_device *dev, struct ifreq *ifr)
 			ptp_over_ipv4_udp = PTP_TCR_TSIPV4ENA;
 			ptp_over_ipv6_udp = PTP_TCR_TSIPV6ENA;
 			ptp_over_ethernet = PTP_TCR_TSIPENA;
+			av_8021asm_en = PTP_TCR_AV8021ASMEN;
 			break;
 
 		case HWTSTAMP_FILTER_PTP_V2_DELAY_REQ:
@@ -667,6 +666,7 @@ static int stmmac_hwtstamp_ioctl(struct net_device *dev, struct ifreq *ifr)
 			ptp_over_ipv4_udp = PTP_TCR_TSIPV4ENA;
 			ptp_over_ipv6_udp = PTP_TCR_TSIPV6ENA;
 			ptp_over_ethernet = PTP_TCR_TSIPENA;
+			av_8021asm_en = PTP_TCR_AV8021ASMEN;
 			break;
 
 		case HWTSTAMP_FILTER_NTP_ALL:
@@ -699,21 +699,20 @@ static int stmmac_hwtstamp_ioctl(struct net_device *dev, struct ifreq *ifr)
 		value = (PTP_TCR_TSENA | PTP_TCR_TSCFUPDT | PTP_TCR_TSCTRLSSR |
 			 tstamp_all | ptp_v2 | ptp_over_ethernet |
 			 ptp_over_ipv6_udp | ptp_over_ipv4_udp | ts_event_en |
-			 ts_master_en | snap_type_sel);
+			 ts_master_en | snap_type_sel | av_8021asm_en);
 		priv->hw->ptp->config_hw_tstamping(priv->ptpaddr, value);
 
 		/* program Sub Second Increment reg */
 		sec_inc = priv->hw->ptp->config_sub_second_increment(
-			priv->ptpaddr, priv->plat->clk_ptp_rate,
+			priv->ptpaddr, priv->plat->clk_ptp_req_rate,
 			priv->plat->has_gmac4);
-		temp = div_u64(1000000000ULL, sec_inc);
 
 		/* calculate default added value:
 		 * formula is :
 		 * addend = (2^32)/freq_div_ratio;
 		 * where, freq_div_ratio = 1e9ns/sec_inc
 		 */
-		temp = (u64)(temp << 32);
+		temp = (u64)((u64)priv->plat->clk_ptp_req_rate << 32);
 		priv->default_addend = div_u64(temp, priv->plat->clk_ptp_rate);
 		priv->hw->ptp->config_addend(priv->ptpaddr,
 					     priv->default_addend);
@@ -799,13 +798,12 @@ static void stmmac_adjust_link(struct net_device *dev)
 {
 	struct stmmac_priv *priv = netdev_priv(dev);
 	struct phy_device *phydev = dev->phydev;
-	unsigned long flags;
 	bool new_state = false;
 
 	if (!phydev)
 		return;
 
-	spin_lock_irqsave(&priv->lock, flags);
+	mutex_lock(&priv->lock);
 
 	if (phydev->link) {
 		u32 ctrl = readl(priv->ioaddr + MAC_CTRL_REG);
@@ -843,14 +841,15 @@ static void stmmac_adjust_link(struct net_device *dev)
 				phydev->speed = SPEED_UNKNOWN;
 				break;
 			}
+			priv->speed = phydev->speed;
 			if (phydev->speed != SPEED_UNKNOWN)
 				stmmac_hw_fix_mac_speed(priv);
-			priv->speed = phydev->speed;
+
 		}
 
 		writel(ctrl, priv->ioaddr + MAC_CTRL_REG);
 
-		if (!priv->oldlink) {
+		if (!priv->oldlink || (priv->oldlink == -1)) {
 			new_state = true;
 			priv->oldlink = true;
 		}
@@ -864,7 +863,23 @@ static void stmmac_adjust_link(struct net_device *dev)
 	if (new_state && netif_msg_link(priv))
 		phy_print_status(phydev);
 
-	spin_unlock_irqrestore(&priv->lock, flags);
+	mutex_unlock(&priv->lock);
+
+	if (new_state) {
+		if (phydev->link == 1 && priv->tx_queue[IPA_DMA_TX_CH].skip_sw)
+			ethqos_ipa_offload_event_handler(priv,
+							 EV_PHY_LINK_UP);
+		else if (phydev->link == 0 &&
+			 priv->tx_queue[IPA_DMA_TX_CH].skip_sw)
+			ethqos_ipa_offload_event_handler(priv,
+							 EV_PHY_LINK_DOWN);
+	}
+#ifdef CONFIG_MSM_BOOT_TIME_MARKER
+if (phydev->link == 1 && !priv->boot_kpi) {
+	place_marker("M - Ethernet is Ready.Link is UP");
+	priv->boot_kpi = true;
+}
+#endif
 
 	if (phydev->is_pseudo_fixed_link)
 		/* Stop PHY layer to call the hook to adjust the link in case
@@ -903,6 +918,30 @@ static void stmmac_check_pcs_mode(struct stmmac_priv *priv)
 	}
 }
 
+static void stmmac_set_speed100(struct phy_device *phydev)
+{
+	u16 bmcr_val, ctrl1000_val, adv_val;
+
+	/* Disable 1000M mode */
+	ctrl1000_val = phy_read(phydev, MII_CTRL1000);
+	ctrl1000_val &= ~(ADVERTISE_1000HALF | ADVERTISE_1000FULL);
+	phy_write(phydev, MII_CTRL1000, ctrl1000_val);
+
+	/* Disable 100M mode */
+	adv_val = phy_read(phydev, MII_ADVERTISE);
+	adv_val &= ~(ADVERTISE_100HALF);
+	phy_write(phydev, MII_ADVERTISE, adv_val);
+
+	/* Disable autoneg */
+	bmcr_val = phy_read(phydev, MII_BMCR);
+	bmcr_val &= ~(BMCR_ANENABLE);
+	phy_write(phydev, MII_BMCR, bmcr_val);
+
+	bmcr_val = phy_read(phydev, MII_BMCR);
+	bmcr_val |= BMCR_ANRESTART;
+	phy_write(phydev, MII_BMCR, bmcr_val);
+}
+
 /**
  * stmmac_init_phy - PHY initialization
  * @dev: net device structure
@@ -920,32 +959,52 @@ static int stmmac_init_phy(struct net_device *dev)
 	char bus_id[MII_BUS_ID_SIZE];
 	int interface = priv->plat->interface;
 	int max_speed = priv->plat->max_speed;
-	priv->oldlink = false;
+	int ret = 0;
+	priv->oldlink = -1;
+	priv->boot_kpi = false;
 	priv->speed = SPEED_UNKNOWN;
 	priv->oldduplex = DUPLEX_UNKNOWN;
 
-	if (priv->plat->phy_node) {
-		phydev = of_phy_connect(dev, priv->plat->phy_node,
-					&stmmac_adjust_link, 0, interface);
+	if (priv->plat->early_eth && priv->phydev) {
+		phydev = priv->phydev;
+		phydev->skip_sw_reset = true;
+		ret = phy_connect_direct(dev, phydev,
+					 &stmmac_adjust_link, interface);
+		if (ret) {
+			pr_info("phy_connect_direct failed\n");
+			return ret;
+		}
 	} else {
-		snprintf(bus_id, MII_BUS_ID_SIZE, "stmmac-%x",
-			 priv->plat->bus_id);
+		if (priv->plat->phy_node) {
+			phydev = of_phy_connect(dev,
+						priv->plat->phy_node,
+						&stmmac_adjust_link,
+						0, interface);
+		} else {
+			snprintf(bus_id, MII_BUS_ID_SIZE, "stmmac-%x",
+				 priv->plat->bus_id);
 
-		snprintf(phy_id_fmt, MII_BUS_ID_SIZE + 3, PHY_ID_FMT, bus_id,
-			 priv->plat->phy_addr);
-		netdev_dbg(priv->dev, "%s: trying to attach to %s\n", __func__,
-			   phy_id_fmt);
+			snprintf(phy_id_fmt,
+				 MII_BUS_ID_SIZE + 3, PHY_ID_FMT, bus_id,
+				 priv->plat->phy_addr);
 
-		phydev = phy_connect(dev, phy_id_fmt, &stmmac_adjust_link,
-				     interface);
-	}
+			netdev_dbg(priv->dev,
+				   "%s: trying to attach to %s\n", __func__,
+				   phy_id_fmt);
 
-	if (IS_ERR_OR_NULL(phydev)) {
-		netdev_err(priv->dev, "Could not attach to PHY\n");
-		if (!phydev)
-			return -ENODEV;
+			phydev = phy_connect(dev,
+					     phy_id_fmt,
+					     &stmmac_adjust_link,
+					     interface);
+		}
 
-		return PTR_ERR(phydev);
+		if (IS_ERR_OR_NULL(phydev)) {
+			netdev_err(priv->dev, "Could not attach to PHY\n");
+			if (!phydev)
+				return -ENODEV;
+
+			return PTR_ERR(phydev);
+		}
 	}
 
 	/* Stop Advertising 1000BASE Capability if interface is not GMII */
@@ -963,6 +1022,23 @@ static int stmmac_init_phy(struct net_device *dev)
 		phydev->supported &= ~(SUPPORTED_1000baseT_Half |
 				       SUPPORTED_100baseT_Half |
 				       SUPPORTED_10baseT_Half);
+
+	/* Early ethernet settings to bring up link in 100M,
+	 * Auto neg Off with full duplex link.
+	 */
+	if (max_speed == SPEED_100 && priv->plat->early_eth) {
+		phydev->autoneg = AUTONEG_DISABLE;
+		phydev->speed = SPEED_100;
+		phydev->duplex = DUPLEX_FULL;
+
+		phydev->advertising = phydev->supported;
+		phydev->advertising &= ~(SUPPORTED_1000baseT_Full);
+
+		pr_info(" qcom-ethqos: %s early eth setting successful\n",
+			__func__);
+
+		stmmac_set_speed100(phydev);
+	}
 
 	/*
 	 * Broken HW is sometimes missing the pull-up resistor on the
@@ -983,6 +1059,19 @@ static int stmmac_init_phy(struct net_device *dev)
 	if (phydev->is_pseudo_fixed_link)
 		phydev->irq = PHY_POLL;
 
+	if (phy_intr_en) {
+		if (phydev->drv->config_intr &&
+		    !phydev->drv->config_intr(phydev)) {
+			pr_debug(" qcom-ethqos: %s config_phy_intr successful\n",
+				 __func__);
+			qcom_ethqos_request_phy_wol(priv->plat);
+			phydev->irq = PHY_IGNORE_INTERRUPT;
+			phydev->interrupts =  PHY_INTERRUPT_ENABLED;
+		} else {
+			pr_alert("Unable to register PHY IRQ\n");
+			phydev->irq = PHY_POLL;
+		}
+	}
 	phy_attached_info(phydev);
 	return 0;
 }
@@ -1043,7 +1132,9 @@ static int stmmac_set_bfsize(int mtu, int bufsize)
 {
 	int ret = bufsize;
 
-	if (mtu >= BUF_SIZE_4KiB)
+	if (mtu >= BUF_SIZE_8KiB)
+		ret = BUF_SIZE_16KiB;
+	else if (mtu >= BUF_SIZE_4KiB)
 		ret = BUF_SIZE_8KiB;
 	else if (mtu >= BUF_SIZE_2KiB)
 		ret = BUF_SIZE_4KiB;
@@ -1072,11 +1163,13 @@ static void stmmac_clear_rx_descriptors(struct stmmac_priv *priv, u32 queue)
 		if (priv->extend_desc)
 			priv->hw->desc->init_rx_desc(&rx_q->dma_erx[i].basic,
 						     priv->use_riwt, priv->mode,
-						     (i == DMA_RX_SIZE - 1));
+						     (i == DMA_RX_SIZE - 1),
+						     priv->dma_buf_sz);
 		else
 			priv->hw->desc->init_rx_desc(&rx_q->dma_rx[i],
 						     priv->use_riwt, priv->mode,
-						     (i == DMA_RX_SIZE - 1));
+						     (i == DMA_RX_SIZE - 1),
+						     priv->dma_buf_sz);
 }
 
 /**
@@ -1147,10 +1240,10 @@ static int stmmac_init_rx_buffers(struct stmmac_priv *priv, struct dma_desc *p,
 		return -ENOMEM;
 	}
 	rx_q->rx_skbuff[i] = skb;
-	rx_q->rx_skbuff_dma[i] = dma_map_single(priv->device, skb->data,
+	rx_q->rx_skbuff_dma[i] = dma_map_single(GET_MEM_PDEV_DEV, skb->data,
 						priv->dma_buf_sz,
 						DMA_FROM_DEVICE);
-	if (dma_mapping_error(priv->device, rx_q->rx_skbuff_dma[i])) {
+	if (dma_mapping_error(GET_MEM_PDEV_DEV, rx_q->rx_skbuff_dma[i])) {
 		netdev_err(priv->dev, "%s: DMA mapping error\n", __func__);
 		dev_kfree_skb_any(skb);
 		return -EINVAL;
@@ -1179,7 +1272,7 @@ static void stmmac_free_rx_buffer(struct stmmac_priv *priv, u32 queue, int i)
 	struct stmmac_rx_queue *rx_q = &priv->rx_queue[queue];
 
 	if (rx_q->rx_skbuff[i]) {
-		dma_unmap_single(priv->device, rx_q->rx_skbuff_dma[i],
+		dma_unmap_single(GET_MEM_PDEV_DEV, rx_q->rx_skbuff_dma[i],
 				 priv->dma_buf_sz, DMA_FROM_DEVICE);
 		dev_kfree_skb_any(rx_q->rx_skbuff[i]);
 	}
@@ -1198,12 +1291,12 @@ static void stmmac_free_tx_buffer(struct stmmac_priv *priv, u32 queue, int i)
 
 	if (tx_q->tx_skbuff_dma[i].buf) {
 		if (tx_q->tx_skbuff_dma[i].map_as_page)
-			dma_unmap_page(priv->device,
+			dma_unmap_page(GET_MEM_PDEV_DEV,
 				       tx_q->tx_skbuff_dma[i].buf,
 				       tx_q->tx_skbuff_dma[i].len,
 				       DMA_TO_DEVICE);
 		else
-			dma_unmap_single(priv->device,
+			dma_unmap_single(GET_MEM_PDEV_DEV,
 					 tx_q->tx_skbuff_dma[i].buf,
 					 tx_q->tx_skbuff_dma[i].len,
 					 DMA_TO_DEVICE);
@@ -1444,11 +1537,11 @@ static void free_dma_rx_desc_resources(struct stmmac_priv *priv)
 
 		/* Free DMA regions of consistent memory previously allocated */
 		if (!priv->extend_desc)
-			dma_free_coherent(priv->device,
+			dma_free_coherent(GET_MEM_PDEV_DEV,
 					  DMA_RX_SIZE * sizeof(struct dma_desc),
 					  rx_q->dma_rx, rx_q->dma_rx_phy);
 		else
-			dma_free_coherent(priv->device, DMA_RX_SIZE *
+			dma_free_coherent(GET_MEM_PDEV_DEV, DMA_RX_SIZE *
 					  sizeof(struct dma_extended_desc),
 					  rx_q->dma_erx, rx_q->dma_rx_phy);
 
@@ -1475,11 +1568,11 @@ static void free_dma_tx_desc_resources(struct stmmac_priv *priv)
 
 		/* Free DMA regions of consistent memory previously allocated */
 		if (!priv->extend_desc)
-			dma_free_coherent(priv->device,
+			dma_free_coherent(GET_MEM_PDEV_DEV,
 					  DMA_TX_SIZE * sizeof(struct dma_desc),
 					  tx_q->dma_tx, tx_q->dma_tx_phy);
 		else
-			dma_free_coherent(priv->device, DMA_TX_SIZE *
+			dma_free_coherent(GET_MEM_PDEV_DEV, DMA_TX_SIZE *
 					  sizeof(struct dma_extended_desc),
 					  tx_q->dma_etx, tx_q->dma_tx_phy);
 
@@ -1522,7 +1615,7 @@ static int alloc_dma_rx_desc_resources(struct stmmac_priv *priv)
 			goto err_dma;
 
 		if (priv->extend_desc) {
-			rx_q->dma_erx = dma_zalloc_coherent(priv->device,
+			rx_q->dma_erx = dma_zalloc_coherent(GET_MEM_PDEV_DEV,
 							    DMA_RX_SIZE *
 							    sizeof(struct
 							    dma_extended_desc),
@@ -1532,7 +1625,7 @@ static int alloc_dma_rx_desc_resources(struct stmmac_priv *priv)
 				goto err_dma;
 
 		} else {
-			rx_q->dma_rx = dma_zalloc_coherent(priv->device,
+			rx_q->dma_rx = dma_zalloc_coherent(GET_MEM_PDEV_DEV,
 							   DMA_RX_SIZE *
 							   sizeof(struct
 							   dma_desc),
@@ -1585,7 +1678,7 @@ static int alloc_dma_tx_desc_resources(struct stmmac_priv *priv)
 			goto err_dma;
 
 		if (priv->extend_desc) {
-			tx_q->dma_etx = dma_zalloc_coherent(priv->device,
+			tx_q->dma_etx = dma_zalloc_coherent(GET_MEM_PDEV_DEV,
 							    DMA_TX_SIZE *
 							    sizeof(struct
 							    dma_extended_desc),
@@ -1594,7 +1687,7 @@ static int alloc_dma_tx_desc_resources(struct stmmac_priv *priv)
 			if (!tx_q->dma_etx)
 				goto err_dma;
 		} else {
-			tx_q->dma_tx = dma_zalloc_coherent(priv->device,
+			tx_q->dma_tx = dma_zalloc_coherent(GET_MEM_PDEV_DEV,
 							   DMA_TX_SIZE *
 							   sizeof(struct
 								  dma_desc),
@@ -1728,11 +1821,17 @@ static void stmmac_start_all_dma(struct stmmac_priv *priv)
 	u32 tx_channels_count = priv->plat->tx_queues_to_use;
 	u32 chan = 0;
 
-	for (chan = 0; chan < rx_channels_count; chan++)
+	for (chan = 0; chan < rx_channels_count; chan++) {
+		if (priv->rx_queue[chan].skip_sw)
+			continue;
 		stmmac_start_rx_dma(priv, chan);
+	}
 
-	for (chan = 0; chan < tx_channels_count; chan++)
+	for (chan = 0; chan < tx_channels_count; chan++) {
+		if (priv->tx_queue[chan].skip_sw)
+			continue;
 		stmmac_start_tx_dma(priv, chan);
+	}
 }
 
 /**
@@ -1747,11 +1846,16 @@ static void stmmac_stop_all_dma(struct stmmac_priv *priv)
 	u32 tx_channels_count = priv->plat->tx_queues_to_use;
 	u32 chan = 0;
 
-	for (chan = 0; chan < rx_channels_count; chan++)
+	for (chan = 0; chan < rx_channels_count; chan++) {
+		if (priv->rx_queue[chan].skip_sw)
+			continue;
 		stmmac_stop_rx_dma(priv, chan);
-
-	for (chan = 0; chan < tx_channels_count; chan++)
+	}
+	for (chan = 0; chan < tx_channels_count; chan++) {
+		if (priv->tx_queue[chan].skip_sw)
+			continue;
 		stmmac_stop_tx_dma(priv, chan);
+	}
 }
 
 /**
@@ -1769,6 +1873,8 @@ static void stmmac_dma_operation_mode(struct stmmac_priv *priv)
 	u32 txmode = 0;
 	u32 rxmode = 0;
 	u32 chan = 0;
+	u32 mtl_rx_int;
+	u8 qmode = 0;
 
 	if (rxfifosz == 0)
 		rxfifosz = priv->dma_cap.rx_fifo_size;
@@ -1800,13 +1906,26 @@ static void stmmac_dma_operation_mode(struct stmmac_priv *priv)
 
 	/* configure all channels */
 	if (priv->synopsys_id >= DWMAC_CORE_4_00) {
-		for (chan = 0; chan < rx_channels_count; chan++)
-			priv->hw->dma->dma_rx_mode(priv->ioaddr, rxmode, chan,
-						   rxfifosz);
+		for (chan = 0; chan < rx_channels_count; chan++) {
+			qmode = priv->plat->rx_queues_cfg[chan].mode_to_use;
 
-		for (chan = 0; chan < tx_channels_count; chan++)
+			priv->hw->dma->dma_rx_mode(priv->ioaddr, rxmode, chan,
+						   rxfifosz, qmode);
+			if (priv->rx_queue[chan].skip_sw) {
+				mtl_rx_int = readl_relaxed(priv->ioaddr +
+							   (0x00000d00 + 0x2c));
+				writel_relaxed(mtl_rx_int & ~(BIT(24)),
+					       priv->ioaddr +
+					       (0x00000d00 + 0x2c));
+			}
+		}
+
+		for (chan = 0; chan < tx_channels_count; chan++) {
+			qmode = priv->plat->tx_queues_cfg[chan].mode_to_use;
+
 			priv->hw->dma->dma_tx_mode(priv->ioaddr, txmode, chan,
-						   txfifosz);
+						   txfifosz, qmode);
+		}
 	} else {
 		priv->hw->dma->dma_mode(priv->ioaddr, txmode, rxmode,
 					rxfifosz);
@@ -1860,18 +1979,23 @@ static void stmmac_tx_clean(struct stmmac_priv *priv, u32 queue)
 			} else {
 				priv->dev->stats.tx_packets++;
 				priv->xstats.tx_pkt_n++;
+				priv->xstats.q_tx_pkt_n[queue]++;
+#ifdef CONFIG_MSM_BOOT_TIME_MARKER
+if (priv->dev->stats.tx_packets == 1)
+	place_marker("M - Ethernet first packet transmitted");
+#endif
 			}
 			stmmac_get_tx_hwtstamp(priv, p, skb);
 		}
 
 		if (likely(tx_q->tx_skbuff_dma[entry].buf)) {
 			if (tx_q->tx_skbuff_dma[entry].map_as_page)
-				dma_unmap_page(priv->device,
+				dma_unmap_page(GET_MEM_PDEV_DEV,
 					       tx_q->tx_skbuff_dma[entry].buf,
 					       tx_q->tx_skbuff_dma[entry].len,
 					       DMA_TO_DEVICE);
 			else
-				dma_unmap_single(priv->device,
+				dma_unmap_single(GET_MEM_PDEV_DEV,
 						 tx_q->tx_skbuff_dma[entry].buf,
 						 tx_q->tx_skbuff_dma[entry].len,
 						 DMA_TO_DEVICE);
@@ -1899,8 +2023,10 @@ static void stmmac_tx_clean(struct stmmac_priv *priv, u32 queue)
 	}
 	tx_q->dirty_tx = entry;
 
-	netdev_tx_completed_queue(netdev_get_tx_queue(priv->dev, queue),
-				  pkts_compl, bytes_compl);
+	if (!priv->tx_coal_timer_disable)
+		netdev_tx_completed_queue(
+			netdev_get_tx_queue(priv->dev, queue),
+			pkts_compl, bytes_compl);
 
 	if (unlikely(netif_tx_queue_stopped(netdev_get_tx_queue(priv->dev,
 								queue))) &&
@@ -1940,6 +2066,13 @@ static void stmmac_tx_err(struct stmmac_priv *priv, u32 chan)
 	struct stmmac_tx_queue *tx_q = &priv->tx_queue[chan];
 	int i;
 
+	if (tx_q->skip_sw) {
+		ethqos_ipa_offload_event_handler(priv, EV_DEV_CLOSE);
+		ethqos_ipa_offload_event_handler(priv, EV_DEV_OPEN);
+		priv->dev->stats.tx_errors++;
+		return;
+	}
+
 	netif_tx_stop_queue(netdev_get_tx_queue(priv->dev, chan));
 
 	stmmac_stop_tx_dma(priv, chan);
@@ -1975,6 +2108,8 @@ static void stmmac_tx_err(struct stmmac_priv *priv, u32 chan)
 static void stmmac_set_dma_operation_mode(struct stmmac_priv *priv, u32 txmode,
 					  u32 rxmode, u32 chan)
 {
+	u8 rxqmode = priv->plat->rx_queues_cfg[chan].mode_to_use;
+	u8 txqmode = priv->plat->tx_queues_cfg[chan].mode_to_use;
 	u32 rx_channels_count = priv->plat->rx_queues_to_use;
 	u32 tx_channels_count = priv->plat->tx_queues_to_use;
 	int rxfifosz = priv->plat->rx_fifo_size;
@@ -1991,9 +2126,9 @@ static void stmmac_set_dma_operation_mode(struct stmmac_priv *priv, u32 txmode,
 
 	if (priv->synopsys_id >= DWMAC_CORE_4_00) {
 		priv->hw->dma->dma_rx_mode(priv->ioaddr, rxmode, chan,
-					   rxfifosz);
+					   rxfifosz, rxqmode);
 		priv->hw->dma->dma_tx_mode(priv->ioaddr, txmode, chan,
-					   txfifosz);
+					   txfifosz, txqmode);
 	} else {
 		priv->hw->dma->dma_mode(priv->ioaddr, txmode, rxmode,
 					rxfifosz);
@@ -2012,13 +2147,15 @@ static void stmmac_dma_interrupt(struct stmmac_priv *priv)
 	u32 tx_channel_count = priv->plat->tx_queues_to_use;
 	int status;
 	u32 chan;
+	struct stmmac_rx_queue *rx_q;
 
 	for (chan = 0; chan < tx_channel_count; chan++) {
-		struct stmmac_rx_queue *rx_q = &priv->rx_queue[chan];
+		rx_q = &priv->rx_queue[chan];
 
 		status = priv->hw->dma->dma_interrupt(priv->ioaddr,
 						      &priv->xstats, chan);
-		if (likely((status & handle_rx)) || (status & handle_tx)) {
+		if ((likely((status & handle_rx)) || (status & handle_tx)) &&
+		    !rx_q->skip_sw) {
 			if (likely(napi_schedule_prep(&rx_q->napi))) {
 				stmmac_disable_dma_irq(priv, chan);
 				__napi_schedule(&rx_q->napi);
@@ -2207,11 +2344,12 @@ static int stmmac_init_dma_engine(struct stmmac_priv *priv)
 			priv->hw->dma->init_tx_chan(priv->ioaddr,
 						    priv->plat->dma_cfg,
 						    tx_q->dma_tx_phy, chan);
-
+			if (priv->tx_queue[chan].skip_sw)
+				continue;
 			tx_q->tx_tail_addr = tx_q->dma_tx_phy;
 			priv->hw->dma->set_tx_tail_ptr(priv->ioaddr,
-						       tx_q->tx_tail_addr,
-						       chan);
+					       tx_q->tx_tail_addr,
+					       chan);
 		}
 	} else {
 		rx_q = &priv->rx_queue[chan];
@@ -2239,8 +2377,11 @@ static void stmmac_tx_timer(unsigned long data)
 	u32 queue;
 
 	/* let's scan all the tx queues */
-	for (queue = 0; queue < tx_queues_count; queue++)
+	for (queue = 0; queue < tx_queues_count; queue++) {
+		if (priv->tx_queue[queue].skip_sw)
+			continue;
 		stmmac_tx_clean(priv, queue);
+	}
 }
 
 /**
@@ -2338,6 +2479,8 @@ static void stmmac_rx_queue_dma_chan_map(struct stmmac_priv *priv)
 	u32 chan;
 
 	for (queue = 0; queue < rx_queues_count; queue++) {
+		if (priv->rx_queue[queue].skip_sw)
+			continue;
 		chan = priv->plat->rx_queues_cfg[queue].chan;
 		priv->hw->mac->map_mtl_to_dma(priv->hw, queue, chan);
 	}
@@ -2495,6 +2638,8 @@ static int stmmac_hw_setup(struct net_device *dev, bool init_ptp)
 			priv->hw->ps = 0;
 		}
 	}
+	priv->hw->crc_strip_en = priv->plat->crc_strip_en;
+	priv->hw->acs_strip_en = 0;
 
 	/* Initialize the MAC Core */
 	priv->hw->mac->core_init(priv->hw, dev);
@@ -2528,14 +2673,14 @@ static int stmmac_hw_setup(struct net_device *dev, bool init_ptp)
 			netdev_warn(priv->dev, "PTP not supported by HW\n");
 		else if (ret)
 			netdev_warn(priv->dev, "PTP init failed\n");
+		else
+			clk_set_rate(
+				priv->plat->clk_ptp_ref,
+				priv->plat->clk_ptp_rate);
+
+		ret = ethqos_init_pps(priv);
 	}
 
-#ifdef CONFIG_DEBUG_FS
-	ret = stmmac_init_fs(dev);
-	if (ret < 0)
-		netdev_warn(priv->dev, "%s: failed debugFS registration\n",
-			    __func__);
-#endif
 	priv->tx_lpi_timer = STMMAC_DEFAULT_TWT_LS;
 
 	if ((priv->use_riwt) && (priv->hw->dma->rx_watchdog)) {
@@ -2616,13 +2761,19 @@ static int stmmac_open(struct net_device *dev)
 		goto init_error;
 	}
 
+#ifdef CONFIG_PTPSUPPORT_OBJ
 	ret = stmmac_hw_setup(dev, true);
+#else
+	ret = stmmac_hw_setup(dev, false);
+#endif
+
 	if (ret < 0) {
 		netdev_err(priv->dev, "%s: Hw setup failed\n", __func__);
 		goto init_error;
 	}
 
-	stmmac_init_tx_coalesce(priv);
+	if (!priv->tx_coal_timer_disable)
+		stmmac_init_tx_coalesce(priv);
 
 	if (dev->phydev)
 		phy_start(dev->phydev);
@@ -2663,6 +2814,8 @@ static int stmmac_open(struct net_device *dev)
 
 	stmmac_enable_all_queues(priv);
 	stmmac_start_all_queues(priv);
+	if (priv->tx_queue[IPA_DMA_TX_CH].skip_sw)
+		ethqos_ipa_offload_event_handler(priv, EV_DEV_OPEN);
 
 	return 0;
 
@@ -2674,8 +2827,8 @@ wolirq_error:
 irq_error:
 	if (dev->phydev)
 		phy_stop(dev->phydev);
-
-	del_timer_sync(&priv->txtimer);
+	if (!priv->tx_coal_timer_disable)
+		del_timer_sync(&priv->txtimer);
 	stmmac_hw_teardown(dev);
 init_error:
 	free_dma_desc_resources(priv);
@@ -2709,7 +2862,8 @@ static int stmmac_release(struct net_device *dev)
 
 	stmmac_disable_all_queues(priv);
 
-	del_timer_sync(&priv->txtimer);
+	if (!priv->tx_coal_timer_disable)
+		del_timer_sync(&priv->txtimer);
 
 	/* Free the IRQ lines */
 	free_irq(dev->irq, dev);
@@ -2723,15 +2877,13 @@ static int stmmac_release(struct net_device *dev)
 
 	/* Release and free the Rx/Tx resources */
 	free_dma_desc_resources(priv);
+	if (priv->tx_queue[IPA_DMA_TX_CH].skip_sw)
+		ethqos_ipa_offload_event_handler(priv, EV_DEV_CLOSE);
 
 	/* Disable the MAC Rx/Tx */
 	priv->hw->mac->set_mac(priv->ioaddr, false);
 
 	netif_carrier_off(dev);
-
-#ifdef CONFIG_DEBUG_FS
-	stmmac_exit_fs(dev);
-#endif
 
 	stmmac_release_ptp(priv);
 
@@ -2771,6 +2923,12 @@ static void stmmac_tso_allocator(struct stmmac_priv *priv, unsigned int des,
 			0, 1,
 			(last_segment) && (tmp_len <= TSO_MAX_BUFF_SIZE),
 			0, 0);
+
+		if (last_segment && tmp_len <= TSO_MAX_BUFF_SIZE) {
+			priv->tx_count_frames = 0;
+			priv->hw->desc->set_tx_ic(desc);
+			priv->xstats.tx_set_ic_bit++;
+		}
 
 		tmp_len -= TSO_MAX_BUFF_SIZE;
 	}
@@ -2860,9 +3018,9 @@ static netdev_tx_t stmmac_tso_xmit(struct sk_buff *skb, struct net_device *dev)
 	first = desc;
 
 	/* first descriptor: fill Headers on Buf1 */
-	des = dma_map_single(priv->device, skb->data, skb_headlen(skb),
+	des = dma_map_single(GET_MEM_PDEV_DEV, skb->data, skb_headlen(skb),
 			     DMA_TO_DEVICE);
-	if (dma_mapping_error(priv->device, des))
+	if (dma_mapping_error(GET_MEM_PDEV_DEV, des))
 		goto dma_map_err;
 
 	tx_q->tx_skbuff_dma[first_entry].buf = des;
@@ -2883,10 +3041,10 @@ static netdev_tx_t stmmac_tso_xmit(struct sk_buff *skb, struct net_device *dev)
 	for (i = 0; i < nfrags; i++) {
 		const skb_frag_t *frag = &skb_shinfo(skb)->frags[i];
 
-		des = skb_frag_dma_map(priv->device, frag, 0,
+		des = skb_frag_dma_map(GET_MEM_PDEV_DEV, frag, 0,
 				       skb_frag_size(frag),
 				       DMA_TO_DEVICE);
-		if (dma_mapping_error(priv->device, des))
+		if (dma_mapping_error(GET_MEM_PDEV_DEV, des))
 			goto dma_map_err;
 
 		stmmac_tso_allocator(priv, des, skb_frag_size(frag),
@@ -2922,13 +3080,21 @@ static netdev_tx_t stmmac_tso_xmit(struct sk_buff *skb, struct net_device *dev)
 
 	/* Manage tx mitigation */
 	priv->tx_count_frames += nfrags + 1;
-	if (likely(priv->tx_coal_frames > priv->tx_count_frames)) {
-		mod_timer(&priv->txtimer,
-			  STMMAC_COAL_TIMER(priv->tx_coal_timer));
-	} else {
+
+	if (likely(priv->tx_coal_timer_disable)) {
 		priv->tx_count_frames = 0;
 		priv->hw->desc->set_tx_ic(desc);
 		priv->xstats.tx_set_ic_bit++;
+	} else {
+		if (likely(priv->tx_coal_frames > priv->tx_count_frames)) {
+			mod_timer(
+				&priv->txtimer,
+				STMMAC_COAL_TIMER(priv->tx_coal_timer));
+		} else {
+			priv->tx_count_frames = 0;
+			priv->hw->desc->set_tx_ic(desc);
+			priv->xstats.tx_set_ic_bit++;
+		}
 	}
 
 	skb_tx_timestamp(skb);
@@ -2976,7 +3142,8 @@ static netdev_tx_t stmmac_tso_xmit(struct sk_buff *skb, struct net_device *dev)
 		print_pkt(skb->data, skb_headlen(skb));
 	}
 
-	netdev_tx_sent_queue(netdev_get_tx_queue(dev, queue), skb->len);
+	if (!priv->tx_coal_timer_disable)
+		netdev_tx_sent_queue(netdev_get_tx_queue(dev, queue), skb->len);
 
 	tx_q->tx_tail_addr = tx_q->dma_tx_phy + (tx_q->cur_tx * sizeof(*desc));
 	priv->hw->dma->set_tx_tail_ptr(priv->ioaddr, tx_q->tx_tail_addr,
@@ -3011,7 +3178,13 @@ static netdev_tx_t stmmac_xmit(struct sk_buff *skb, struct net_device *dev)
 	struct dma_desc *desc, *first;
 	struct stmmac_tx_queue *tx_q;
 	unsigned int enh_desc;
-	unsigned int des;
+	unsigned int des, int_mod;
+	unsigned int eth_type;
+
+	GET_ETH_TYPE(skb->data, eth_type);
+
+	if (eth_type == ETH_P_IP || eth_type == ETH_P_IPV6)
+		skb_orphan(skb);
 
 	tx_q = &priv->tx_queue[queue];
 
@@ -3027,7 +3200,11 @@ static netdev_tx_t stmmac_xmit(struct sk_buff *skb, struct net_device *dev)
 			 * because if TSO is supported then at least this
 			 * one will be capable.
 			 */
-			skb_set_queue_mapping(skb, 0);
+			if (!priv->tx_queue[0].skip_sw)
+				skb_set_queue_mapping(skb, 0);
+			else
+				skb_set_queue_mapping
+				(skb, ALL_OTHER_TRAFFIC_TX_CHANNEL);
 
 			return stmmac_tso_xmit(skb, dev);
 		}
@@ -3081,9 +3258,9 @@ static netdev_tx_t stmmac_xmit(struct sk_buff *skb, struct net_device *dev)
 		else
 			desc = tx_q->dma_tx + entry;
 
-		des = skb_frag_dma_map(priv->device, frag, 0, len,
+		des = skb_frag_dma_map(GET_MEM_PDEV_DEV, frag, 0, len,
 				       DMA_TO_DEVICE);
-		if (dma_mapping_error(priv->device, des))
+		if (dma_mapping_error(GET_MEM_PDEV_DEV, des))
 			goto dma_map_err; /* should reuse desc w/o issues */
 
 		tx_q->tx_skbuff[entry] = NULL;
@@ -3142,22 +3319,37 @@ static netdev_tx_t stmmac_xmit(struct sk_buff *skb, struct net_device *dev)
 
 	dev->stats.tx_bytes += skb->len;
 
+	priv->tx_count_frames += nfrags + 1;
+
 	/* According to the coalesce parameter the IC bit for the latest
 	 * segment is reset and the timer re-started to clean the tx status.
 	 * This approach takes care about the fragments: desc is the first
 	 * element in case of no SG.
 	 */
-	priv->tx_count_frames += nfrags + 1;
-	if (likely(priv->tx_coal_frames > priv->tx_count_frames)) {
-		mod_timer(&priv->txtimer,
-			  STMMAC_COAL_TIMER(priv->tx_coal_timer));
+	if (likely(priv->tx_coal_timer_disable)) {
+		if (priv->plat->get_plat_tx_coal_frames) {
+			int_mod = priv->plat->get_plat_tx_coal_frames(skb);
+
+			if (!(tx_q->cur_tx % int_mod)) {
+				priv->tx_count_frames = 0;
+				priv->hw->desc->set_tx_ic(desc);
+				priv->xstats.tx_set_ic_bit++;
+			}
+		}
 	} else {
-		priv->tx_count_frames = 0;
-		priv->hw->desc->set_tx_ic(desc);
-		priv->xstats.tx_set_ic_bit++;
+		if (likely(priv->tx_coal_frames > priv->tx_count_frames)) {
+			mod_timer(
+				&priv->txtimer,
+				STMMAC_COAL_TIMER(priv->tx_coal_timer));
+		} else {
+			priv->tx_count_frames = 0;
+			priv->hw->desc->set_tx_ic(desc);
+			priv->xstats.tx_set_ic_bit++;
+		}
 	}
 
-	skb_tx_timestamp(skb);
+	if (!priv->hwts_tx_en)
+		skb_tx_timestamp(skb);
 
 	/* Ready to fill the first descriptor and set the OWN bit w/o any
 	 * problems because all the descriptors are actually ready to be
@@ -3166,9 +3358,9 @@ static netdev_tx_t stmmac_xmit(struct sk_buff *skb, struct net_device *dev)
 	if (likely(!is_jumbo)) {
 		bool last_segment = (nfrags == 0);
 
-		des = dma_map_single(priv->device, skb->data,
+		des = dma_map_single(GET_MEM_PDEV_DEV, skb->data,
 				     nopaged_len, DMA_TO_DEVICE);
-		if (dma_mapping_error(priv->device, des))
+		if (dma_mapping_error(GET_MEM_PDEV_DEV, des))
 			goto dma_map_err;
 
 		tx_q->tx_skbuff_dma[first_entry].buf = des;
@@ -3199,8 +3391,8 @@ static netdev_tx_t stmmac_xmit(struct sk_buff *skb, struct net_device *dev)
 		dma_wmb();
 	}
 
-	netdev_tx_sent_queue(netdev_get_tx_queue(dev, queue), skb->len);
-
+	if (!priv->tx_coal_timer_disable)
+		netdev_tx_sent_queue(netdev_get_tx_queue(dev, queue), skb->len);
 	if (priv->synopsys_id < DWMAC_CORE_4_00)
 		priv->hw->dma->enable_dma_transmission(priv->ioaddr);
 	else {
@@ -3282,9 +3474,9 @@ static inline void stmmac_rx_refill(struct stmmac_priv *priv, u32 queue)
 
 			rx_q->rx_skbuff[entry] = skb;
 			rx_q->rx_skbuff_dma[entry] =
-			    dma_map_single(priv->device, skb->data, bfsize,
+			    dma_map_single(GET_MEM_PDEV_DEV, skb->data, bfsize,
 					   DMA_FROM_DEVICE);
-			if (dma_mapping_error(priv->device,
+			if (dma_mapping_error(GET_MEM_PDEV_DEV,
 					      rx_q->rx_skbuff_dma[entry])) {
 				netdev_err(priv->dev, "Rx DMA map failed\n");
 				dev_kfree_skb(skb);
@@ -3309,7 +3501,7 @@ static inline void stmmac_rx_refill(struct stmmac_priv *priv, u32 queue)
 		dma_wmb();
 
 		if (unlikely(priv->synopsys_id >= DWMAC_CORE_4_00))
-			priv->hw->desc->init_rx_desc(p, priv->use_riwt, 0, 0);
+			priv->hw->desc->init_rx_desc(p, priv->use_riwt, 0, 0, priv->dma_buf_sz);
 		else
 			priv->hw->desc->set_rx_owner(p);
 
@@ -3331,9 +3523,8 @@ static inline void stmmac_rx_refill(struct stmmac_priv *priv, u32 queue)
 static int stmmac_rx(struct stmmac_priv *priv, int limit, u32 queue)
 {
 	struct stmmac_rx_queue *rx_q = &priv->rx_queue[queue];
-	unsigned int entry = rx_q->cur_rx;
 	int coe = priv->hw->rx_csum;
-	unsigned int next_entry;
+	unsigned int next_entry = rx_q->cur_rx;
 	unsigned int count = 0;
 
 	if (netif_msg_rx_status(priv)) {
@@ -3348,9 +3539,11 @@ static int stmmac_rx(struct stmmac_priv *priv, int limit, u32 queue)
 		priv->hw->desc->display_ring(rx_head, DMA_RX_SIZE, true);
 	}
 	while (count < limit) {
-		int status;
+		int entry, status;
 		struct dma_desc *p;
 		struct dma_desc *np;
+
+		entry = next_entry;
 
 		if (priv->extend_desc)
 			p = (struct dma_desc *)(rx_q->dma_erx + entry);
@@ -3381,8 +3574,9 @@ static int stmmac_rx(struct stmmac_priv *priv, int limit, u32 queue)
 							   &priv->xstats,
 							   rx_q->dma_erx +
 							   entry);
-		if (unlikely(status == discard_frame)) {
-			priv->dev->stats.rx_errors++;
+		if (unlikely(status & discard_frame)) {
+			if (!(status & ctxt_desc))
+				priv->dev->stats.rx_errors++;
 			if (priv->hwts_rx_en && !priv->extend_desc) {
 				/* DESC2 & DESC3 will be overwritten by device
 				 * with timestamp value, hence reinitialize
@@ -3391,7 +3585,7 @@ static int stmmac_rx(struct stmmac_priv *priv, int limit, u32 queue)
 				 */
 				dev_kfree_skb_any(rx_q->rx_skbuff[entry]);
 				rx_q->rx_skbuff[entry] = NULL;
-				dma_unmap_single(priv->device,
+				dma_unmap_single(GET_MEM_PDEV_DEV,
 						 rx_q->rx_skbuff_dma[entry],
 						 priv->dma_buf_sz,
 						 DMA_FROM_DEVICE);
@@ -3418,7 +3612,7 @@ static int stmmac_rx(struct stmmac_priv *priv, int limit, u32 queue)
 						   "len %d larger than size (%d)\n",
 						   frame_len, priv->dma_buf_sz);
 				priv->dev->stats.rx_length_errors++;
-				break;
+				continue;
 			}
 
 			/* ACS is set; GMAC core strips PAD/FCS for IEEE 802.3
@@ -3428,8 +3622,13 @@ static int stmmac_rx(struct stmmac_priv *priv, int limit, u32 queue)
 			 * feature is always disabled and packets need to be
 			 * stripped manually.
 			 */
-			if (unlikely(priv->synopsys_id >= DWMAC_CORE_4_00) ||
-			    unlikely(status != llc_snap))
+			if ((likely(priv->synopsys_id >= DWMAC_CORE_4_00) &&
+			     ((unlikely(!priv->hw->crc_strip_en) &&
+			       status != llc_snap) ||
+			      (unlikely(!priv->hw->acs_strip_en) &&
+			       status == llc_snap))) ||
+			    (unlikely(priv->synopsys_id < DWMAC_CORE_4_00) &&
+			     unlikely(status != llc_snap)))
 				frame_len -= ETH_FCS_LEN;
 
 			if (netif_msg_rx_status(priv)) {
@@ -3454,10 +3653,10 @@ static int stmmac_rx(struct stmmac_priv *priv, int limit, u32 queue)
 						dev_warn(priv->device,
 							 "packet dropped\n");
 					priv->dev->stats.rx_dropped++;
-					break;
+					continue;
 				}
 
-				dma_sync_single_for_cpu(priv->device,
+				dma_sync_single_for_cpu(GET_MEM_PDEV_DEV,
 							rx_q->rx_skbuff_dma
 							[entry], frame_len,
 							DMA_FROM_DEVICE);
@@ -3467,7 +3666,7 @@ static int stmmac_rx(struct stmmac_priv *priv, int limit, u32 queue)
 							frame_len);
 
 				skb_put(skb, frame_len);
-				dma_sync_single_for_device(priv->device,
+				dma_sync_single_for_device(GET_MEM_PDEV_DEV,
 							   rx_q->rx_skbuff_dma
 							   [entry], frame_len,
 							   DMA_FROM_DEVICE);
@@ -3479,14 +3678,14 @@ static int stmmac_rx(struct stmmac_priv *priv, int limit, u32 queue)
 							   "%s: Inconsistent Rx chain\n",
 							   priv->dev->name);
 					priv->dev->stats.rx_dropped++;
-					break;
+					continue;
 				}
 				prefetch(skb->data - NET_IP_ALIGN);
 				rx_q->rx_skbuff[entry] = NULL;
 				rx_q->rx_zeroc_thresh++;
 
 				skb_put(skb, frame_len);
-				dma_unmap_single(priv->device,
+				dma_unmap_single(GET_MEM_PDEV_DEV,
 						 rx_q->rx_skbuff_dma[entry],
 						 priv->dma_buf_sz,
 						 DMA_FROM_DEVICE);
@@ -3512,14 +3711,19 @@ static int stmmac_rx(struct stmmac_priv *priv, int limit, u32 queue)
 			napi_gro_receive(&rx_q->napi, skb);
 
 			priv->dev->stats.rx_packets++;
+
+#ifdef CONFIG_MSM_BOOT_TIME_MARKER
+	if (priv->dev->stats.rx_packets == 1)
+		place_marker("M - Ethernet first packet received");
+#endif
 			priv->dev->stats.rx_bytes += frame_len;
 		}
-		entry = next_entry;
 	}
 
 	stmmac_rx_refill(priv, queue);
 
 	priv->xstats.rx_pkt_n += count;
+	priv->xstats.q_rx_pkt_n[queue] += count;
 
 	return count;
 }
@@ -3545,8 +3749,11 @@ static int stmmac_poll(struct napi_struct *napi, int budget)
 	priv->xstats.napi_poll++;
 
 	/* check all the queues */
-	for (queue = 0; queue < tx_count; queue++)
+	for (queue = 0; queue < tx_count; queue++) {
+		if (priv->tx_queue[queue].skip_sw)
+			continue;
 		stmmac_tx_clean(priv, queue);
+	}
 
 	work_done = stmmac_rx(priv, budget, rx_q->queue_index);
 	if (work_done < budget) {
@@ -3571,8 +3778,11 @@ static void stmmac_tx_timeout(struct net_device *dev)
 	u32 chan;
 
 	/* Clear Tx resources and restart transmitting again */
-	for (chan = 0; chan < tx_count; chan++)
+	for (chan = 0; chan < tx_count; chan++) {
+		if (priv->tx_queue[chan].skip_sw)
+			continue;
 		stmmac_tx_err(priv, chan);
+	}
 }
 
 /**
@@ -3605,11 +3815,23 @@ static void stmmac_set_rx_mode(struct net_device *dev)
 static int stmmac_change_mtu(struct net_device *dev, int new_mtu)
 {
 	struct stmmac_priv *priv = netdev_priv(dev);
+	int txfifosz = priv->plat->tx_fifo_size;
+
+	if (txfifosz == 0)
+		txfifosz = priv->dma_cap.tx_fifo_size;
+
+	txfifosz /= priv->plat->tx_queues_to_use;
 
 	if (netif_running(dev)) {
 		netdev_err(priv->dev, "must be stopped to change its MTU\n");
 		return -EBUSY;
 	}
+
+	new_mtu = STMMAC_ALIGN(new_mtu);
+
+	/* If condition true, FIFO is too small or MTU too large */
+	if ((txfifosz < new_mtu) || (new_mtu > BUF_SIZE_16KiB))
+		return -EINVAL;
 
 	dev->mtu = new_mtu;
 
@@ -3685,6 +3907,7 @@ static irqreturn_t stmmac_interrupt(int irq, void *dev_id)
 	u32 tx_cnt = priv->plat->tx_queues_to_use;
 	u32 queues_count;
 	u32 queue;
+	struct stmmac_rx_queue *rx_q;
 
 	queues_count = (rx_cnt > tx_cnt) ? rx_cnt : tx_cnt;
 
@@ -3711,8 +3934,9 @@ static irqreturn_t stmmac_interrupt(int irq, void *dev_id)
 
 		if (priv->synopsys_id >= DWMAC_CORE_4_00) {
 			for (queue = 0; queue < queues_count; queue++) {
-				struct stmmac_rx_queue *rx_q =
-				&priv->rx_queue[queue];
+				if (priv->rx_queue[queue].skip_sw)
+					continue;
+				rx_q = &priv->rx_queue[queue];
 
 				status |=
 				priv->hw->mac->host_mtl_irq_status(priv->hw,
@@ -3779,6 +4003,8 @@ static int stmmac_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 		break;
 	case SIOCSHWTSTAMP:
 		ret = stmmac_hwtstamp_ioctl(dev, rq);
+	case SIOCDEVPRIVATE:
+		ret = ethqos_handle_prv_ioctl(dev, rq, cmd);
 		break;
 	default:
 		break;
@@ -3799,6 +4025,21 @@ static int stmmac_set_mac_address(struct net_device *ndev, void *addr)
 	priv->hw->mac->set_umac_addr(priv->hw, ndev->dev_addr, 0);
 
 	return ret;
+}
+
+static u16 stmmac_tx_select_queue(
+		struct net_device *dev,
+		struct sk_buff *skb,
+		void *accel_priv,
+		select_queue_fallback_t fallback)
+{
+	struct stmmac_priv *priv = netdev_priv(dev);
+
+	if (likely(priv->plat->tx_select_queue))
+		return priv->plat->tx_select_queue(
+			dev, skb, accel_priv, fallback);
+
+	return fallback(dev, skb);
 }
 
 #ifdef CONFIG_DEBUG_FS
@@ -3838,6 +4079,9 @@ static int stmmac_sysfs_ring_read(struct seq_file *seq, void *v)
 	u32 rx_count = priv->plat->rx_queues_to_use;
 	u32 tx_count = priv->plat->tx_queues_to_use;
 	u32 queue;
+
+	if ((dev->flags & IFF_UP) == 0)
+		return 0;
 
 	for (queue = 0; queue < rx_count; queue++) {
 		struct stmmac_rx_queue *rx_q = &priv->rx_queue[queue];
@@ -4029,6 +4273,7 @@ static const struct net_device_ops stmmac_netdev_ops = {
 	.ndo_poll_controller = stmmac_poll_controller,
 #endif
 	.ndo_set_mac_address = stmmac_set_mac_address,
+	.ndo_select_queue = stmmac_tx_select_queue,
 };
 
 /**
@@ -4275,7 +4520,7 @@ int stmmac_dvr_probe(struct device *device,
 			       (8 * priv->plat->rx_queues_to_use));
 	}
 
-	spin_lock_init(&priv->lock);
+	mutex_init(&priv->lock);
 
 	/* If a specific clk_csr value is passed from the platform
 	 * this means that the CSR Clock Range selection cannot be
@@ -4310,6 +4555,17 @@ int stmmac_dvr_probe(struct device *device,
 		goto error_netdev_register;
 	}
 
+	/* Disable tx_coal_timer if plat provides callback */
+	priv->tx_coal_timer_disable =
+		plat_dat->get_plat_tx_coal_frames ? true : false;
+
+#ifdef CONFIG_DEBUG_FS
+	ret = stmmac_init_fs(ndev);
+	if (ret < 0)
+		netdev_warn(priv->dev, "%s: failed debugFS registration\n",
+			    __func__);
+#endif
+
 	return ret;
 
 error_netdev_register:
@@ -4343,6 +4599,9 @@ int stmmac_dvr_remove(struct device *dev)
 
 	netdev_info(priv->dev, "%s: removing driver", __func__);
 
+#ifdef CONFIG_DEBUG_FS
+	stmmac_exit_fs(ndev);
+#endif
 	stmmac_stop_all_dma(priv);
 
 	priv->hw->mac->set_mac(priv->ioaddr, false);
@@ -4356,6 +4615,7 @@ int stmmac_dvr_remove(struct device *dev)
 	    priv->hw->pcs != STMMAC_PCS_TBI &&
 	    priv->hw->pcs != STMMAC_PCS_RTBI)
 		stmmac_mdio_unregister(ndev);
+	mutex_destroy(&priv->lock);
 	free_netdev(ndev);
 
 	return 0;
@@ -4373,7 +4633,6 @@ int stmmac_suspend(struct device *dev)
 {
 	struct net_device *ndev = dev_get_drvdata(dev);
 	struct stmmac_priv *priv = netdev_priv(ndev);
-	unsigned long flags;
 
 	if (!ndev || !netif_running(ndev))
 		return 0;
@@ -4381,7 +4640,7 @@ int stmmac_suspend(struct device *dev)
 	if (ndev->phydev)
 		phy_stop(ndev->phydev);
 
-	spin_lock_irqsave(&priv->lock, flags);
+	mutex_lock(&priv->lock);
 
 	netif_device_detach(ndev);
 	stmmac_stop_all_queues(priv);
@@ -4399,12 +4658,14 @@ int stmmac_suspend(struct device *dev)
 		priv->hw->mac->set_mac(priv->ioaddr, false);
 		pinctrl_pm_select_sleep_state(priv->device);
 		/* Disable clock in case of PWM is off */
-		clk_disable(priv->plat->pclk);
-		clk_disable(priv->plat->stmmac_clk);
+		if (priv->plat->clk_ptp_ref)
+			clk_disable_unprepare(priv->plat->clk_ptp_ref);
+		clk_disable_unprepare(priv->plat->pclk);
+		clk_disable_unprepare(priv->plat->stmmac_clk);
 	}
-	spin_unlock_irqrestore(&priv->lock, flags);
+	mutex_unlock(&priv->lock);
 
-	priv->oldlink = false;
+	priv->oldlink = -1;
 	priv->speed = SPEED_UNKNOWN;
 	priv->oldduplex = DUPLEX_UNKNOWN;
 	return 0;
@@ -4446,7 +4707,6 @@ int stmmac_resume(struct device *dev)
 {
 	struct net_device *ndev = dev_get_drvdata(dev);
 	struct stmmac_priv *priv = netdev_priv(ndev);
-	unsigned long flags;
 
 	if (!netif_running(ndev))
 		return 0;
@@ -4458,15 +4718,17 @@ int stmmac_resume(struct device *dev)
 	 * from another devices (e.g. serial console).
 	 */
 	if (device_may_wakeup(priv->device)) {
-		spin_lock_irqsave(&priv->lock, flags);
+		mutex_lock(&priv->lock);
 		priv->hw->mac->pmt(priv->hw, 0);
-		spin_unlock_irqrestore(&priv->lock, flags);
+		mutex_unlock(&priv->lock);
 		priv->irq_wake = 0;
 	} else {
 		pinctrl_pm_select_default_state(priv->device);
 		/* enable the clk previously disabled */
-		clk_enable(priv->plat->stmmac_clk);
-		clk_enable(priv->plat->pclk);
+		clk_prepare_enable(priv->plat->stmmac_clk);
+		clk_prepare_enable(priv->plat->pclk);
+		if (priv->plat->clk_ptp_ref)
+			clk_prepare_enable(priv->plat->clk_ptp_ref);
 		/* reset the phy so that it's ready */
 		if (priv->mii)
 			stmmac_mdio_reset(priv->mii);
@@ -4474,7 +4736,7 @@ int stmmac_resume(struct device *dev)
 
 	netif_device_attach(ndev);
 
-	spin_lock_irqsave(&priv->lock, flags);
+	mutex_lock(&priv->lock);
 
 	stmmac_reset_queues_param(priv);
 
@@ -4486,14 +4748,17 @@ int stmmac_resume(struct device *dev)
 	stmmac_clear_descriptors(priv);
 
 	stmmac_hw_setup(ndev, false);
-	stmmac_init_tx_coalesce(priv);
+
+	if (!priv->tx_coal_timer_disable)
+		stmmac_init_tx_coalesce(priv);
+
 	stmmac_set_rx_mode(ndev);
 
 	stmmac_enable_all_queues(priv);
 
 	stmmac_start_all_queues(priv);
 
-	spin_unlock_irqrestore(&priv->lock, flags);
+	mutex_unlock(&priv->lock);
 
 	if (ndev->phydev)
 		phy_start(ndev->phydev);

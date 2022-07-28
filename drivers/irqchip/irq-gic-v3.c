@@ -149,6 +149,43 @@ static u64 __maybe_unused gic_read_iar(void)
 }
 #endif
 
+/*
+ * gic_show_pending_irq - Shows the pending interrupts
+ * Note: Interrupts should be disabled on the cpu from which
+ * this is called to get accurate list of pending interrupts.
+ */
+void gic_show_pending_irqs(void)
+{
+	void __iomem *base;
+	u32 pending, enabled;
+	unsigned int j;
+
+	base = gic_data.dist_base;
+	for (j = 0; j * 32 < gic_data.irq_nr; j++) {
+		enabled = readl_relaxed(base +
+					GICD_ISENABLER + j * 4);
+		pending = readl_relaxed(base +
+					GICD_ISPENDR + j * 4);
+		pr_err("Pending and enabled irqs[%d] %x %x\n", j,
+				pending, enabled);
+	}
+}
+
+/*
+ * get_gic_highpri_irq - Returns next high priority interrupt on current CPU
+ */
+unsigned int get_gic_highpri_irq(void)
+{
+	unsigned long flags;
+	unsigned int val = 0;
+
+	local_irq_save(flags);
+	val = read_gicreg(ICC_HPPIR1_EL1);
+	local_irq_restore(flags);
+
+	return val;
+}
+
 static void gic_enable_redist(bool enable)
 {
 	void __iomem *rbase;
@@ -375,6 +412,9 @@ static void gic_hibernation_suspend(void)
 	void __iomem *base = gic_data.dist_base;
 	void __iomem *rdist_base = gic_data_rdist_sgi_base();
 
+	if ((base == NULL) || (rdist_base == NULL))
+		return;
+
 	gic_data.enabled_sgis = readl_relaxed(rdist_base + GICD_ISENABLER);
 	gic_data.pending_sgis = readl_relaxed(rdist_base + GICD_ISPENDR);
 	/* Store edge level for PPIs by reading GICR_ICFGR1 */
@@ -438,6 +478,10 @@ static void gic_show_resume_irq(struct gic_chip_data *gic)
 	gic_resume_irq=0;
 	gic_irq_cnt=0;
 //ASUS_BSP --- [PM]reset IRQ count and IRQ number every time.
+
+	if (base == NULL)
+		return;
+
 	if (!msm_show_resume_irq_mask)
 		return;
 
@@ -996,7 +1040,9 @@ static struct irq_chip gic_chip = {
 	.irq_set_affinity	= gic_set_affinity,
 	.irq_get_irqchip_state	= gic_irq_get_irqchip_state,
 	.irq_set_irqchip_state	= gic_irq_set_irqchip_state,
-	.flags			= IRQCHIP_SET_TYPE_MASKED,
+	.flags			= IRQCHIP_SET_TYPE_MASKED |
+				  IRQCHIP_SKIP_SET_WAKE |
+				  IRQCHIP_MASK_ON_SUSPEND,
 };
 
 static struct irq_chip gic_eoimode1_chip = {
@@ -1009,7 +1055,9 @@ static struct irq_chip gic_eoimode1_chip = {
 	.irq_get_irqchip_state	= gic_irq_get_irqchip_state,
 	.irq_set_irqchip_state	= gic_irq_set_irqchip_state,
 	.irq_set_vcpu_affinity	= gic_irq_set_vcpu_affinity,
-	.flags			= IRQCHIP_SET_TYPE_MASKED,
+	.flags			= IRQCHIP_SET_TYPE_MASKED |
+				  IRQCHIP_SKIP_SET_WAKE |
+				  IRQCHIP_MASK_ON_SUSPEND,
 };
 
 #define GIC_ID_NR		(1U << gic_data.rdists.id_bits)
@@ -1379,7 +1427,7 @@ static void __init gic_of_setup_kvm_info(struct device_node *node)
 	gic_set_kvm_info(&gic_v3_kvm_info);
 }
 
-static int __init gic_of_init(struct device_node *node, struct device_node *parent)
+static int __init gicv3_of_init(struct device_node *node, struct device_node *parent)
 {
 	void __iomem *dist_base;
 	struct redist_region *rdist_regs;
@@ -1448,7 +1496,7 @@ out_unmap_dist:
 	return err;
 }
 
-IRQCHIP_DECLARE(gic_v3, "arm,gic-v3", gic_of_init);
+IRQCHIP_DECLARE(gic_v3, "arm,gic-v3", gicv3_of_init);
 
 #ifdef CONFIG_ACPI
 static struct

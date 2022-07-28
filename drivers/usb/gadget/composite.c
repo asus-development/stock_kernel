@@ -17,6 +17,7 @@
 #include <linux/module.h>
 #include <linux/device.h>
 #include <linux/utsname.h>
+#include <soc/qcom/boot_stats.h>
 
 #include <linux/usb/composite.h>
 #include <linux/usb/otg.h>
@@ -458,7 +459,7 @@ static int usb_func_wakeup_int(struct usb_function *func)
 		return -EINVAL;
 
 	gadget = func->config->cdev->gadget;
-	if ((gadget->speed != USB_SPEED_SUPER) || !func->func_wakeup_allowed) {
+	if ((gadget->speed < USB_SPEED_SUPER) || !func->func_wakeup_allowed) {
 		DBG(func->config->cdev,
 			"Function Wakeup is not possible. speed=%u, func_wakeup_allowed=%u\n",
 			gadget->speed,
@@ -921,6 +922,7 @@ static int set_config(struct usb_composite_dev *cdev,
 	if (!c)
 		goto done;
 
+	place_marker("M - USB Device is enumerated");
 	usb_gadget_set_state(gadget, USB_STATE_CONFIGURED);
 	cdev->config = c;
 
@@ -2145,6 +2147,7 @@ void composite_disconnect(struct usb_gadget *gadget)
 	 * disconnect callbacks?
 	 */
 	spin_lock_irqsave(&cdev->lock, flags);
+	cdev->suspended = 0;
 	if (cdev->config)
 		reset_config(cdev);
 	if (cdev->driver->disconnect)
@@ -2428,7 +2431,8 @@ void composite_resume(struct usb_gadget *gadget)
 	/* REVISIT:  should we have config level
 	 * suspend/resume callbacks?
 	 */
-	DBG(cdev, "resume\n");
+	INFO(cdev, "USB Resume\n");
+	place_marker("M - USB device is resumed");
 	if (cdev->driver->resume)
 		cdev->driver->resume(cdev);
 

@@ -1,4 +1,4 @@
-/* Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -240,6 +240,7 @@ static void *usbpd_ipc_log;
 #define VDM_BUSY_TIME		50
 #define VCONN_ON_TIME		100
 #define SINK_TX_TIME		16
+#define DR_SWAP_RESPONSE_TIME	20
 
 /* tPSHardReset + tSafe0V */
 #define SNK_HARD_RESET_VBUS_OFF_TIME	(35 + 650)
@@ -377,7 +378,6 @@ extern const u32 default_src_caps[];
 extern int default_src_caps_size;
 #endif
 static const u32 default_snk_caps[] = { 0x2601912C };	/* VSafe5V @ 3A */
-static int charger_type = 0;
 
 struct usbpd *pd_global;
 
@@ -406,7 +406,7 @@ struct usbpd {
 	struct workqueue_struct	*wq;
 	struct work_struct	sm_work;
 	struct work_struct	start_periph_work;
-	struct work_struct	asus_evtlog_work;
+	struct work_struct	restart_host_work;
 	struct hrtimer		timer;
 	bool			sm_queued;
 
@@ -415,6 +415,8 @@ struct usbpd {
 	enum usbpd_state	current_state;
 	bool			hard_reset_recvd;
 	ktime_t			hard_reset_recvd_time;
+	ktime_t			dr_swap_recvd_time;
+
 	struct list_head	rx_q;
 	spinlock_t		rx_lock;
 	struct rx_msg		*rx_ext_msg;
@@ -432,6 +434,7 @@ struct usbpd {
 	bool			peer_usb_comm;
 	bool			peer_pr_swap;
 	bool			peer_dr_swap;
+	bool			no_usb3dp_concurrency;
 
 	u32			sink_caps[7];
 	int			num_sink_caps;
@@ -468,7 +471,6 @@ struct usbpd {
 	struct regulator	*vconn;
 	bool			vbus_enabled;
 	bool			vconn_enabled;
-	bool			vconn_is_external;
 
 	u8			tx_msgid[SOPII_MSG + 1];
 	u8			rx_msgid[SOPII_MSG + 1];
@@ -609,9 +611,24 @@ static void start_usb_peripheral_work(struct work_struct *w)
 	dual_role_instance_changed(pd->dual_role);
 }
 
-static void start_asus_evtlog_work(struct work_struct *w)
+static void restart_usb_host_work(struct work_struct *w)
 {
-	ASUSEvtlog("[USB] set_chg_mode: %d\n", charger_type);
+	struct usbpd *pd = container_of(w, struct usbpd, restart_host_work);
+	int ret;
+
+	if (!pd->no_usb3dp_concurrency)
+		return;
+
+	stop_usb_host(pd);
+
+	/* blocks until USB host is completely stopped */
+	ret = extcon_blocking_sync(pd->extcon, EXTCON_USB_HOST, 0);
+	if (ret) {
+		usbpd_err(&pd->dev, "err(%d) stopping host", ret);
+		return;
+	}
+
+	start_usb_host(pd, false);
 }
 
 /**
@@ -867,11 +884,6 @@ static int pd_select_pdo(struct usbpd *pd, int pdo_pos, int uv, int ua)
 		return -ENOTSUPP;
 	}
 
-	/* Can't sink more than 5V if VCONN is sourced from the VBUS input */
-	if (pd->vconn_enabled && !pd->vconn_is_external &&
-			pd->requested_voltage > 5000000)
-		return -ENOTSUPP;
-
 	pd->requested_current = curr;
 	pd->requested_pdo = pdo_pos;
 
@@ -986,6 +998,7 @@ static void pd_send_hard_reset(struct usbpd *pd)
 	pd->hard_reset_count++;
 	pd_phy_signal(HARD_RESET_SIG);
 	pd->in_pr_swap = false;
+	pd->pd_connected = false;
 	power_supply_set_property(pd->usb_psy, POWER_SUPPLY_PROP_PR_SWAP, &val);
 }
 
@@ -1261,6 +1274,9 @@ static void phy_msg_received(struct usbpd *pd, enum pd_sop_type sop,
 		kfree(rx_msg);
 		return;
 	}
+
+	if (IS_CTRL(rx_msg, MSG_DR_SWAP))
+		pd->dr_swap_recvd_time = ktime_get();
 
 	spin_lock_irqsave(&pd->rx_lock, flags);
 	list_add_tail(&rx_msg->entry, &pd->rx_q);
@@ -1703,8 +1719,6 @@ static void usbpd_set_state(struct usbpd *pd, enum usbpd_state next_state)
 					POWER_SUPPLY_PROP_REAL_TYPE, &val);
 			if (!ret) {
 				usbpd_dbg(&pd->dev, "type:%d\n", val.intval);
-				charger_type = val.intval;
-				queue_work(pd->wq, &pd->asus_evtlog_work);
 				if (val.intval == POWER_SUPPLY_TYPE_USB ||
 					val.intval == POWER_SUPPLY_TYPE_USB_CDP){
 					usbpd_info(&pd->dev, "[PD] start usb peripheral\n");
@@ -2002,6 +2016,7 @@ static void handle_vdm_rx(struct usbpd *pd, struct rx_msg *rx_msg)
 
 		/* Set to USB and DP cocurrency mode */
 		extcon_blocking_sync(pd->extcon, EXTCON_DISP_DP, 2);
+		queue_work(pd->wq, &pd->restart_host_work);
 	}
 
 	/* if it's a supported SVID, pass the message to the handler */
@@ -2586,6 +2601,7 @@ static void usbpd_sm(struct work_struct *w)
 	int ret, ms;
 	struct rx_msg *rx_msg = NULL;
 	unsigned long flags;
+	s64 dr_swap_delta;
 
 	usbpd_dbg(&pd->dev, "handle state %s\n",
 			usbpd_state_strings[pd->current_state]);
@@ -2804,6 +2820,10 @@ static void usbpd_sm(struct work_struct *w)
 		ret = pd_send_msg(pd, MSG_SOURCE_CAPABILITIES, default_src_caps,
 				default_src_caps_size, SOP_MSG);
 		if (ret) {
+			if (pd->pd_connected) {
+				usbpd_set_state(pd, PE_SEND_SOFT_RESET);
+				break;
+			}
 			pd->caps_count++;
 			if (pd->caps_count >= PD_CAPS_COUNT) {
 				usbpd_dbg(&pd->dev, "Src CapsCounter exceeded, disabling PD\n");
@@ -2866,6 +2886,14 @@ static void usbpd_sm(struct work_struct *w)
 		} else if (IS_CTRL(rx_msg, MSG_DR_SWAP)) {
 			if (pd->vdm_state == MODE_ENTERED) {
 				usbpd_set_state(pd, PE_SRC_HARD_RESET);
+				break;
+			}
+
+			dr_swap_delta = ktime_ms_delta(ktime_get(),
+						pd->dr_swap_recvd_time);
+			if (dr_swap_delta > DR_SWAP_RESPONSE_TIME) {
+				usbpd_err(&pd->dev, "DR swap timedout(%lld), do not send ACCEPT\n",
+								dr_swap_delta);
 				break;
 			}
 
@@ -3155,6 +3183,14 @@ static void usbpd_sm(struct work_struct *w)
 				break;
 			}
 
+			dr_swap_delta = ktime_ms_delta(ktime_get(),
+						pd->dr_swap_recvd_time);
+			if (dr_swap_delta > DR_SWAP_RESPONSE_TIME) {
+				usbpd_err(&pd->dev, "DR swap timedout(%lld), do not send ACCEPT\n",
+								dr_swap_delta);
+				break;
+			}
+
 			ret = pd_send_msg(pd, MSG_ACCEPT, NULL, 0, SOP_MSG);
 			if (ret) {
 				usbpd_set_state(pd, PE_SEND_SOFT_RESET);
@@ -3174,20 +3210,6 @@ static void usbpd_sm(struct work_struct *w)
 			usbpd_set_state(pd, PE_PRS_SNK_SRC_TRANSITION_TO_OFF);
 			break;
 		} else if (IS_CTRL(rx_msg, MSG_VCONN_SWAP)) {
-			/*
-			 * if VCONN is connected to VBUS, make sure we are
-			 * not in high voltage contract, otherwise reject.
-			 */
-			if (!pd->vconn_is_external &&
-					(pd->requested_voltage > 5000000)) {
-				ret = pd_send_msg(pd, MSG_REJECT, NULL, 0,
-						SOP_MSG);
-				if (ret)
-					usbpd_set_state(pd, PE_SEND_SOFT_RESET);
-
-				break;
-			}
-
 			ret = pd_send_msg(pd, MSG_ACCEPT, NULL, 0, SOP_MSG);
 			if (ret) {
 				usbpd_set_state(pd, PE_SEND_SOFT_RESET);
@@ -3226,6 +3248,7 @@ static void usbpd_sm(struct work_struct *w)
 			memcpy(&pd->src_cap_ext_db, rx_msg->payload,
 				sizeof(pd->src_cap_ext_db));
 			complete(&pd->is_ready);
+			break;
 		} else if (IS_EXT(rx_msg, MSG_PPS_STATUS)) {
 			if (rx_msg->data_len != sizeof(pd->pps_status_db)) {
 				usbpd_err(&pd->dev, "Invalid pps status db\n");
@@ -3234,6 +3257,7 @@ static void usbpd_sm(struct work_struct *w)
 			memcpy(&pd->pps_status_db, rx_msg->payload,
 				sizeof(pd->pps_status_db));
 			complete(&pd->is_ready);
+			break;
 		} else if (IS_EXT(rx_msg, MSG_STATUS)) {
 			if (rx_msg->data_len != PD_STATUS_DB_LEN) {
 				usbpd_err(&pd->dev, "Invalid status db\n");
@@ -3243,6 +3267,7 @@ static void usbpd_sm(struct work_struct *w)
 				sizeof(pd->status_db));
 			kobject_uevent(&pd->dev.kobj, KOBJ_CHANGE);
 			complete(&pd->is_ready);
+			break;
 		} else if (IS_EXT(rx_msg, MSG_BATTERY_CAPABILITIES)) {
 			if (rx_msg->data_len != PD_BATTERY_CAP_DB_LEN) {
 				usbpd_err(&pd->dev, "Invalid battery cap db\n");
@@ -3251,6 +3276,7 @@ static void usbpd_sm(struct work_struct *w)
 			memcpy(&pd->battery_cap_db, rx_msg->payload,
 				sizeof(pd->battery_cap_db));
 			complete(&pd->is_ready);
+			break;
 		} else if (IS_EXT(rx_msg, MSG_BATTERY_STATUS)) {
 			if (rx_msg->data_len != sizeof(pd->battery_sts_dobj)) {
 				usbpd_err(&pd->dev, "Invalid bat sts dobj\n");
@@ -3259,6 +3285,7 @@ static void usbpd_sm(struct work_struct *w)
 			memcpy(&pd->battery_sts_dobj, rx_msg->payload,
 				sizeof(pd->battery_sts_dobj));
 			complete(&pd->is_ready);
+			break;
 		} else if (IS_CTRL(rx_msg, MSG_GET_SOURCE_CAP_EXTENDED)) {
 			handle_get_src_cap_extended(pd);
 		} else if (IS_EXT(rx_msg, MSG_GET_BATTERY_CAP)) {
@@ -3586,8 +3613,6 @@ static int psy_changed(struct notifier_block *nb, unsigned long evt, void *ptr)
 			queue_work(pd->wq, &pd->start_periph_work);
 		}
 		usbpd_info(&pd->dev, "[PD] PE_START = 0 typec mode: %d type:%d\n", typec_mode, val.intval);
-		charger_type = val.intval;
-		queue_work(pd->wq, &pd->asus_evtlog_work);
 		return 0;
 	}
 
@@ -4656,7 +4681,7 @@ struct usbpd *usbpd_create(struct device *parent)
 	}
 	INIT_WORK(&pd->sm_work, usbpd_sm);
 	INIT_WORK(&pd->start_periph_work, start_usb_peripheral_work);
-	INIT_WORK(&pd->asus_evtlog_work, start_asus_evtlog_work);
+	INIT_WORK(&pd->restart_host_work, restart_usb_host_work);
 	hrtimer_init(&pd->timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 	pd->timer.function = pd_timeout;
 	mutex_init(&pd->swap_lock);
@@ -4712,9 +4737,6 @@ struct usbpd *usbpd_create(struct device *parent)
 	extcon_set_property_capability(pd->extcon, EXTCON_USB_HOST,
 			EXTCON_PROP_USB_SS);
 
-	pd->vconn_is_external = device_property_present(parent,
-					"qcom,vconn-uses-external-source");
-
 	pd->num_sink_caps = device_property_read_u32_array(parent,
 			"qcom,default-sink-caps", NULL, 0);
 	if (pd->num_sink_caps > 0) {
@@ -4753,6 +4775,8 @@ struct usbpd *usbpd_create(struct device *parent)
 		pd->num_sink_caps = ARRAY_SIZE(default_snk_caps);
 	}
 
+	if (device_property_read_bool(parent, "qcom,no-usb3-dp-concurrency"))
+		pd->no_usb3dp_concurrency = true;
 	/*
 	 * Register the Android dual-role class (/sys/class/dual_role_usb/).
 	 * The first instance should be named "otg_default" as that's what

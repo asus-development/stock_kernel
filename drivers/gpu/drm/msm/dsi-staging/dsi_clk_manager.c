@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -17,8 +17,6 @@
 #include <linux/slab.h>
 #include <linux/msm-bus.h>
 #include "dsi_clk.h"
-
-extern int asus_lcd_clk_debug;
 
 struct dsi_core_clks {
 	struct dsi_core_clk_info clks;
@@ -141,15 +139,16 @@ int dsi_clk_set_pixel_clk_rate(void *client, u64 pixel_clk, u32 index)
  * dsi_clk_set_byte_clk_rate() - set frequency for byte clock
  * @client:	DSI clock client pointer.
  * @byte_clk:	Byte clock rate in Hz.
+ * @byte_intf_clk: Byte interface clock rate in Hz.
  * @index:	Index of the DSI controller.
  * return: error code in case of failure or 0 for success.
  */
-int dsi_clk_set_byte_clk_rate(void *client, u64 byte_clk, u32 index)
+int dsi_clk_set_byte_clk_rate(void *client, u64 byte_clk,
+					u64 byte_intf_clk, u32 index)
 {
 	int rc = 0;
 	struct dsi_clk_client_info *c = client;
 	struct dsi_clk_mngr *mngr;
-	u64 byte_intf_rate;
 
 	mngr = c->mngr;
 	rc = clk_set_rate(mngr->link_clks[index].hs_clks.byte_clk, byte_clk);
@@ -159,12 +158,14 @@ int dsi_clk_set_byte_clk_rate(void *client, u64 byte_clk, u32 index)
 		mngr->link_clks[index].freq.byte_clk_rate = byte_clk;
 
 	if (mngr->link_clks[index].hs_clks.byte_intf_clk) {
-		byte_intf_rate = mngr->link_clks[index].freq.byte_clk_rate / 2;
 		rc = clk_set_rate(mngr->link_clks[index].hs_clks.byte_intf_clk,
-				  byte_intf_rate);
+							byte_intf_clk);
 		if (rc)
 			pr_err("failed to set clk rate for byte intf clk=%d\n",
 			       rc);
+		else
+			mngr->link_clks[index].freq.byte_intf_clk_rate
+							= byte_intf_clk;
 	}
 
 	return rc;
@@ -373,12 +374,10 @@ static int dsi_link_hs_clk_set_rate(struct dsi_link_hs_clk_info *link_hs_clks,
 
 	/*
 	 * If byte_intf_clk is present, set rate for that too.
-	 * For DPHY: byte_intf_clk_rate = byte_clk_rate / 2
-	 * todo: this needs to be revisited when support for CPHY is added
 	 */
 	if (link_hs_clks->byte_intf_clk) {
 		rc = clk_set_rate(link_hs_clks->byte_intf_clk,
-			(l_clks->freq.byte_clk_rate / 2));
+				l_clks->freq.byte_intf_clk_rate);
 		if (rc) {
 			pr_err("set_rate failed for byte_intf_clk rc = %d\n",
 				rc);
@@ -603,9 +602,6 @@ static int dsi_display_core_clk_enable(struct dsi_core_clks *clks,
 	int i;
 	struct dsi_core_clks *clk, *m_clks;
 
-	if (asus_lcd_clk_debug)
-		printk("[Display] enable core clk \n");
-
 	/*
 	 * In case of split DSI usecases, the clock for master controller should
 	 * be enabled before the other controller. Master controller in the
@@ -734,9 +730,6 @@ static int dsi_display_core_clk_disable(struct dsi_core_clks *clks,
 	int rc = 0;
 	int i;
 	struct dsi_core_clks *clk, *m_clks;
-
-	if (asus_lcd_clk_debug)
-		printk("[Display] disable core clk \n");
 
 	/*
 	 * In case of split DSI usecases, clock for slave DSI controllers should
@@ -1145,12 +1138,10 @@ static int dsi_recheck_clk_state(struct dsi_clk_mngr *mngr)
 	old_c_clk_state = mngr->core_clk_state;
 	old_l_clk_state = mngr->link_clk_state;
 
-	if (asus_lcd_clk_debug) {
-		printk("[Display] c_clk_state (%d -> %d)\n",
-			old_c_clk_state, new_core_clk_state);
-		printk("[Display] l_clk_state (%d -> %d)\n",
-			old_l_clk_state, new_link_clk_state);
-	}
+	pr_debug("c_clk_state (%d -> %d)\n",
+		old_c_clk_state, new_core_clk_state);
+	pr_debug("l_clk_state (%d -> %d)\n",
+		old_l_clk_state, new_link_clk_state);
 
 	if (c_clks || l_clks) {
 		rc = dsi_update_clk_state(mngr, c_clks, new_core_clk_state,
@@ -1162,59 +1153,6 @@ static int dsi_recheck_clk_state(struct dsi_clk_mngr *mngr)
 	}
 
 error:
-	return rc;
-}
-
-int dsi_clk_examine_validity(void *client, enum dsi_clk_type clk, bool suspend_fix)
-{
-	int rc = 0;
-	struct dsi_clk_client_info *current_client = client;
-	struct dsi_clk_client_info *c;
-	struct dsi_clk_mngr *mngr;
-	struct list_head *pos = NULL;
-	bool changed = false;
-
-	if (!asus_lcd_clk_debug)
-		return 0;
-
-	if (!client || !clk || clk > (DSI_CORE_CLK | DSI_LINK_CLK)) {
-		pr_err("[Display] Invalid params, client = %pK, clk = 0x%x\n",
-		       client, clk);
-		return -EINVAL;
-	}
-
-	mngr = current_client->mngr;
-	mutex_lock(&mngr->clk_mutex);
-
-	list_for_each(pos, &mngr->client_list) {
-		c = list_entry(pos, struct dsi_clk_client_info, list);
-		printk("[Display] client %p, core rc %d, link rc %d.\n",
-				c, c->core_refcount, c->link_refcount);
-
-		if (c->core_refcount > 0 || c->link_refcount > 0)
-			printk("[Display] possible clock voting unbalanced\n");
-
-		if (c->core_refcount > 0 && suspend_fix) {
-			c->core_refcount = 0;
-			c->core_clk_state = DSI_CLK_OFF;
-			changed = true;
-		}
-
-		if (c->link_refcount > 0 && suspend_fix) {
-			c->link_refcount = 0;
-			c->link_clk_state = DSI_CLK_OFF;
-			changed = true;
-		}
-	}
-
-	if (changed) {
-		printk("[Display] try to fix clock unbalance\n");
-		rc = dsi_recheck_clk_state(mngr);
-		if (rc)
-			pr_err("[Display] Failed to adjust clock state rc = %d\n", rc);
-	}
-
-	mutex_unlock(&mngr->clk_mutex);
 	return rc;
 }
 
@@ -1235,14 +1173,6 @@ int dsi_clk_req_state(void *client, enum dsi_clk_type clk,
 
 	mngr = c->mngr;
 	mutex_lock(&mngr->clk_mutex);
-
-	if (clk & DSI_CORE_CLK) {
-		if (asus_lcd_clk_debug) {
-			printk("[Display] hd: %p, req: %s, c: %d, f: %pS\n",
-					c, (state == DSI_CLK_ON ? "ON " : "OFF"),
-					c->core_refcount, __builtin_return_address(0));
-		}
-	}
 
 	pr_debug("[%s]%s: CLK=%d, new_state=%d, core=%d, linkl=%d\n",
 	       mngr->name, c->name, clk, state, c->core_clk_state,

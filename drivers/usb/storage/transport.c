@@ -627,7 +627,6 @@ void usb_stor_invoke_transport(struct scsi_cmnd *srb, struct us_data *us)
 	 */
 	if (test_bit(US_FLIDX_TIMED_OUT, &us->dflags)) {
 		usb_stor_dbg(us, "-- command was aborted\n");
-		printk(KERN_ERR "[usb-storage] -- command was aborted\n");
 		srb->result = DID_ABORT << 16;
 		goto Handle_Errors;
 	}
@@ -635,7 +634,6 @@ void usb_stor_invoke_transport(struct scsi_cmnd *srb, struct us_data *us)
 	/* if there is a transport error, reset and don't auto-sense */
 	if (result == USB_STOR_TRANSPORT_ERROR) {
 		usb_stor_dbg(us, "-- transport indicates error, resetting\n");
-		printk(KERN_ERR "[usb-storage] -- transport indicates error, resetting\n");
 		srb->result = DID_ERROR << 16;
 		goto Handle_Errors;
 	}
@@ -676,7 +674,6 @@ void usb_stor_invoke_transport(struct scsi_cmnd *srb, struct us_data *us)
 	 */
 	if (result == USB_STOR_TRANSPORT_FAILED) {
 		usb_stor_dbg(us, "-- transport indicates command failure\n");
-		printk(KERN_ERR "[usb-storage] -- transport indicates command failure\n");
 		need_auto_sense = 1;
 	}
 
@@ -706,7 +703,6 @@ void usb_stor_invoke_transport(struct scsi_cmnd *srb, struct us_data *us)
 	      (srb->cmnd[0] == LOG_SENSE) ||
 	      (srb->cmnd[0] == MODE_SENSE_10))) {
 		usb_stor_dbg(us, "-- unexpectedly short transfer\n");
-		printk(KERN_ERR "[usb-storage] -- unexpectedly short transfer\n");
 	}
 
 	/* Now, if we need to do the auto-sense, let's do it */
@@ -742,7 +738,6 @@ Retry_Sense:
 
 		if (test_bit(US_FLIDX_TIMED_OUT, &us->dflags)) {
 			usb_stor_dbg(us, "-- auto-sense aborted\n");
-			printk(KERN_ERR "[usb-storage] -- auto-sense aborted\n");
 			srb->result = DID_ABORT << 16;
 
 			/* If SANE_SENSE caused this problem, disable it */
@@ -762,7 +757,6 @@ Retry_Sense:
 		if (temp_result == USB_STOR_TRANSPORT_FAILED &&
 				sense_size != US_SENSE_SIZE) {
 			usb_stor_dbg(us, "-- auto-sense failure, retry small sense\n");
-			printk(KERN_ERR "[usb-storage] -- auto-sense failure, retry small sense\n");
 			sense_size = US_SENSE_SIZE;
 			us->fflags &= ~US_FL_SANE_SENSE;
 			us->fflags |= US_FL_BAD_SENSE;
@@ -772,7 +766,6 @@ Retry_Sense:
 		/* Other failures */
 		if (temp_result != USB_STOR_TRANSPORT_GOOD) {
 			usb_stor_dbg(us, "-- auto-sense failure\n");
-			printk(KERN_ERR "[usb-storage] -- auto-sense failure\n");
 
 			/*
 			 * we skip the reset if this happens to be a

@@ -34,9 +34,6 @@
 #include <linux/proc_fs.h>
 
 #ifdef CAMERA_CCI
-#include "cam_sensor_cmn_header.h"
-#include "cam_sensor_i2c.h"
-#include "cam_cci_dev.h"
 #endif //CAMERA_CCI
 
 #define DEBUG_NODE
@@ -1591,29 +1588,19 @@ static int icm_set_interrupt(struct icm_sensor *sensor,
 		const u8 mask, bool on)
 {
 	int ret;
-	u8 data;
 
-	if (sensor->cfg.is_asleep)
+	if (sensor->cfg.is_asleep) {
 		return -EINVAL;
-
-	ret = cci_read_byte_data(sensor,
-				sensor->reg.int_enable);
-	if (ret < 0) {
-		dev_err(sensor->dev,
-			"Fail read interrupt mode. ret=%d\n", ret);
-		return ret;
 	}
 
 	if (on) {
-		data = (u8)ret;
-		data |= mask;
+		ret = cci_mask_write_byte_data(sensor,
+				sensor->reg.int_enable, mask, mask);
 	} else {
-		data = (u8)ret;
-		data &= ~mask;
+		ret = cci_mask_write_byte_data(sensor,
+				sensor->reg.int_enable, mask, 0);
 	}
 
-	ret = cci_write_byte_data(sensor,
-			sensor->reg.int_enable, data);
 	if (ret < 0) {
 		dev_err(sensor->dev,
 			"Fail to set interrupt. ret=%d\n", ret);
@@ -4781,6 +4768,10 @@ s32 cci_mask_write_byte_data(struct icm_sensor *sensor, u8 command, u8 mask, u8 
 	write_data = (u8)read_data;
 	write_data &= ~mask;
 	write_data |= value & mask;
+	if (write_data == read_data) {
+		rc = 0;
+		goto out;
+	}
 	rc = cci_write_byte_data(sensor, command, write_data);
 	if (rc) {
 		icm_errmsg("Failed to write reg 0x%02x, rc=%d\n", command, rc);

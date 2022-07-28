@@ -1,4 +1,4 @@
-/* Copyright (c) 2015-2019, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2015-2020, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -131,6 +131,7 @@ static struct icnss_vreg_info icnss_vreg_info[] = {
 	{NULL, "vdd-cx-mx", 752000, 752000, 0, 0, false},
 	{NULL, "vdd-1.8-xo", 1800000, 1800000, 0, 0, false},
 	{NULL, "vdd-1.3-rfa", 1304000, 1304000, 0, 0, false},
+	{NULL, "vdd-3.3-ch1", 3312000, 3312000, 0, 0, false},
 	{NULL, "vdd-3.3-ch0", 3312000, 3312000, 0, 0, false},
 };
 
@@ -959,12 +960,25 @@ static int icnss_driver_event_server_arrive(void *data)
 	int ret = 0;
 	bool ignore_assert = false;
 
-	if (!penv)
+	if (!penv) {
+		kfree(data);
 		return -ENODEV;
+	}
+
+	if (test_bit(ICNSS_MODEM_SHUTDOWN, &penv->state)) {
+		icnss_pr_dbg("WLFW server arrive: Modem is down");
+		kfree(data);
+		return -EINVAL;
+	}
 
 	set_bit(ICNSS_WLFW_EXISTS, &penv->state);
 	clear_bit(ICNSS_FW_DOWN, &penv->state);
 	icnss_ignore_fw_timeout(false);
+
+	if (test_bit(ICNSS_WLFW_CONNECTED, &penv->state)) {
+		icnss_pr_err("QMI Server already in Connected State\n");
+		ICNSS_ASSERT(0);
+	}
 
 	ret = icnss_connect_to_fw_server(penv, data);
 	if (ret)
@@ -1578,13 +1592,19 @@ static int icnss_modem_notifier_nb(struct notifier_block *nb,
 			icnss_pr_err("Not able to Collect msa0 segment dump, Apps permissions not assigned %d\n",
 				     ret);
 		}
+		clear_bit(ICNSS_MODEM_SHUTDOWN, &priv->state);
 		return NOTIFY_OK;
 	}
+
+	if (code == SUBSYS_AFTER_SHUTDOWN)
+		clear_bit(ICNSS_MODEM_SHUTDOWN, &priv->state);
 
 	if (code != SUBSYS_BEFORE_SHUTDOWN)
 		return NOTIFY_OK;
 
 	priv->is_ssr = true;
+
+	set_bit(ICNSS_MODEM_SHUTDOWN, &priv->state);
 
 	if (notif->crashed)
 		set_bit(ICNSS_MODEM_CRASHED, &priv->state);
@@ -2631,6 +2651,7 @@ static int icnss_smmu_init(struct icnss_priv *priv)
 	int s1_bypass = 1;
 	int fast = 1;
 	int stall_disable = 1;
+	int non_fatal_faults = 1;
 	int ret = 0;
 
 	icnss_pr_dbg("Initializing SMMU\n");
@@ -2684,6 +2705,16 @@ static int icnss_smmu_init(struct icnss_priv *priv)
 			goto set_attr_fail;
 		}
 		icnss_pr_dbg("SMMU STALL DISABLE map set\n");
+
+		ret = iommu_domain_set_attr(mapping->domain,
+					    DOMAIN_ATTR_NON_FATAL_FAULTS,
+					    &non_fatal_faults);
+		if (ret) {
+			icnss_pr_err("Failed to set SMMU non_fatal_faults attribute, err = %d\n",
+				    ret);
+			goto set_attr_fail;
+		}
+		icnss_pr_dbg("SMMU NON FATAL map set\n");
 	}
 
 	ret = arm_iommu_attach_device(&priv->pdev->dev, mapping);
@@ -3141,6 +3172,9 @@ static int icnss_stats_show_state(struct seq_file *s, struct icnss_priv *priv)
 			continue;
 		case ICNSS_MODEM_CRASHED:
 			seq_puts(s, "MODEM CRASHED");
+			continue;
+		case ICNSS_MODEM_SHUTDOWN:
+			seq_puts(s, "MODEM SHUTDOWN");
 		}
 
 		seq_printf(s, "UNKNOWN-%d", i);
@@ -3516,16 +3550,16 @@ static const struct file_operations icnss_regread_fops = {
 
 
 /* ASUS_BSP+++ for wlan firmware add debug ini */
-static char do_wlan_fw_adddebugini[256];
-module_param_string(do_wlan_fw_adddebugini,do_wlan_fw_adddebugini, sizeof(do_wlan_fw_adddebugini), S_IWUSR | S_IRUGO);
-MODULE_PARM_DESC(do_wlan_fw_adddebugini, "Is the wlan fw debug ini");
+static char do_wlan_driver_log_level[256];
+module_param_string(do_wlan_driver_log_level,do_wlan_driver_log_level, sizeof(do_wlan_driver_log_level), S_IWUSR | S_IRUGO);
+MODULE_PARM_DESC(do_wlan_driver_log_level, "wlan driver log level flag");
 
-char * wcnss_get_fw_adddebugini(void)
+char * wcnss_get_driver_log_level(void)
 {
-       pr_info("[wcnss]: do_wlan_fw_adddebugini=%s.\n", do_wlan_fw_adddebugini);
-       return do_wlan_fw_adddebugini;
+       pr_info("[wcnss]: do_wlan_driver_log_level=%s.\n", do_wlan_driver_log_level);
+       return do_wlan_driver_log_level;
 }
-EXPORT_SYMBOL(wcnss_get_fw_adddebugini);
+EXPORT_SYMBOL(wcnss_get_driver_log_level);
 /* ASUS_BSP--- for wlan firmware add debug ini  */
 
 #ifdef CONFIG_ICNSS_DEBUG

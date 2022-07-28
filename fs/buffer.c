@@ -1081,9 +1081,6 @@ static struct buffer_head *
 __getblk_slow(struct block_device *bdev, sector_t block,
 	     unsigned size, gfp_t gfp)
 {
-	int ret;
-	struct buffer_head *bh;
-
 	/* Size must be multiple of hard sectorsize */
 	if (unlikely(size & (bdev_logical_block_size(bdev)-1) ||
 			(size < 512 || size > PAGE_SIZE))) {
@@ -1096,22 +1093,20 @@ __getblk_slow(struct block_device *bdev, sector_t block,
 		return NULL;
 	}
 
-retry:
-	bh = __find_get_block(bdev, block, size);
-	if (bh)
-		return bh;
+	for (;;) {
+		struct buffer_head *bh;
+		int ret;
 
-	ret = grow_buffers(bdev, block, size, gfp);
-	if (ret == 0) {
-		free_more_memory();
-		 goto retry;
-	 } else if (ret > 0) {
-		 bh = __find_get_block(bdev, block, size);
-		 if (bh)
+		bh = __find_get_block(bdev, block, size);
+		if (bh)
 			return bh;
-	 }
 
-	 return NULL;
+		ret = grow_buffers(bdev, block, size, gfp);
+		if (ret < 0)
+			return NULL;
+		if (ret == 0)
+			free_more_memory();
+	}
 }
 
 /*

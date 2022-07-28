@@ -1,4 +1,4 @@
-/* Copyright (c) 2018-2019, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2018-2020, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -26,6 +26,7 @@
 #include <linux/of_address.h>
 #include <linux/platform_device.h>
 #include <linux/pwm.h>
+#include <linux/qpnp/qpnp-misc.h>
 #include <linux/regmap.h>
 #include <linux/regulator/consumer.h>
 #include <linux/slab.h>
@@ -175,6 +176,7 @@ enum haptics_custom_effect_param {
 #define HAP_PLAY_BIT			BIT(7)
 
 #define REG_HAP_SEC_ACCESS		0xD0
+#define REG_HAP_PERPH_RESET_CTL3	0xDA
 
 #define STRONG_MAGNITUDE                0x7fff
 struct qti_hap_effect {
@@ -225,6 +227,7 @@ struct qti_hap_chip {
 	struct hrtimer			hap_disable_timer;
 	struct dentry			*hap_debugfs;
 	struct mutex			param_lock;
+	struct notifier_block		twm_nb;
 	spinlock_t			bus_lock;
 	ktime_t				last_sc_time;
 	int				play_irq;
@@ -236,6 +239,20 @@ struct qti_hap_chip {
 	bool				play_irq_en;
 	bool				vdd_enabled;
 	bool				module_en;
+	bool				twm_state;
+	bool				haptics_ext_pin_twm;
+};
+
+struct hap_addr_val {
+	u16 addr;
+	u8  value;
+};
+
+static struct hap_addr_val twm_ext_cfg[] = {
+	{REG_HAP_PLAY, 0x00}, /* Stop playing haptics waveform */
+	{REG_HAP_PERPH_RESET_CTL3, 0x0D}, /* Disable SHUTDOWN1_RB reset */
+	{REG_HAP_SEL, 0x01}, /* Configure for external-pin mode */
+	{REG_HAP_EN_CTL1, 0x80}, /* Enable haptics driver */
 };
 
 extern struct qti_hap_chip *qti_data;
@@ -254,33 +271,6 @@ static void qti_haptics_set_gain(struct input_dev *dev, u16 gain);
 static int qti_haptics_erase(struct input_dev *dev, int effect_id);
 static int qti_haptics_config_vmax(struct qti_hap_chip *chip, int vmax_mv);
 
-static ssize_t vibrator_on_store(struct device *dev,
-		struct device_attribute *attr, const char *buf, size_t count)
-{
-	int tmp = 0;
-	int rc = 0;
-	struct qti_hap_chip *qti_data = dev_get_drvdata(dev);
-	//struct qti_hap_chip *chip_dev = input_get_drvdata(qti_hap_chip *dev);
-	tmp = buf[0] - 48;
-
-	printk("[vibrator] %s \n",__func__);
-	if (tmp == 0) {
-		printk("[vibrator] %s : vibrator_off !!! \n",__func__);
-		rc = qti_haptics_playback(qti_data->input_dev, 0, 0);
-		rc =  qti_haptics_erase(qti_data->input_dev, 0);
-	} else if (tmp == 1) {
-		printk("[vibrator] %s : vibrator_on !!! \n",__func__);
-		rc = qti_haptics_playback(qti_data->input_dev, 0, 1);
-	}
-	return count;
-}
-
-static ssize_t vibrator_on_show(struct device *dev,
-		struct device_attribute *attr, char *buf)
-{
-	return -EPERM;
-}
-
 static ssize_t qpnp_haptics_show_state(struct device *dev,
 		struct device_attribute *attr, char *buf)
 {
@@ -294,22 +284,31 @@ static ssize_t qpnp_haptics_store_state(struct device *dev,
 {
 	return -EPERM;
 }
-
-static ssize_t qpnp_haptics_show_duration(struct device *dev,
+//========================
+static int test_vmax_mv = 2140;
+module_param(test_vmax_mv, int, S_IRUGO | S_IWUSR);
+MODULE_PARM_DESC(test_vmax_mv, "test_vmax_mv");
+static int test_play_rate_us = 5100;
+module_param(test_play_rate_us, int, S_IRUGO | S_IWUSR);
+MODULE_PARM_DESC(test_play_rate_us, "test_play_rate_us");
+static int test_duration_ms = 25000;
+module_param(test_duration_ms, int, S_IRUGO | S_IWUSR);
+MODULE_PARM_DESC(test_duration_ms, "test_duration_ms");
+//========================
+static ssize_t vibrator_on_show(struct device *dev,
 		struct device_attribute *attr, char *buf)
 {
 	return -EPERM;
 }
 
-static ssize_t qpnp_haptics_store_duration(struct device *dev,
+static ssize_t vibrator_on_store(struct device *dev,
 		struct device_attribute *attr, const char *buf, size_t count)
 {
 	struct qti_hap_chip *qti_data = dev_get_drvdata(dev);
 	u32 val;
-	int rc, tmp;
+	int rc;
 	ktime_t rem;
 	s64 time_us;
-	s16 level;
 
 	printk("[vibrator] %s \n",__func__);
 	rc = kstrtouint(buf, 0, &val);
@@ -317,9 +316,14 @@ static ssize_t qpnp_haptics_store_duration(struct device *dev,
 		return rc;
 
 	/* setting 0 on duration is NOP for now */
-	if (val <= 0)
-		return count;
-
+	switch(val)
+	{
+		case 0:
+			printk("[vibrator] %s : vibrator_off !!! \n",__func__);
+			rc = qti_haptics_playback(qti_data->input_dev, 0, 0);
+			rc =  qti_haptics_erase(qti_data->input_dev, 0);
+			break;
+		case 1:
 	if (hrtimer_active(&qti_data->hap_disable_timer)) {
 		rem = hrtimer_get_remaining(&qti_data->hap_disable_timer);
 		time_us = ktime_to_us(rem);
@@ -331,12 +335,12 @@ static ssize_t qpnp_haptics_store_duration(struct device *dev,
 	//echo 25000
 
 	mutex_lock(&qti_data->param_lock);
-	qti_data->play.length_us = val * USEC_PER_MSEC;
-	level = 0x7fff;
-	qti_data->config.vmax_mv = 2900;
-	qti_data->config.play_rate_us = 4166;
-	tmp = level * qti_data->config.vmax_mv;
-	qti_data->play.vmax_mv = tmp / 0x7fff;
+
+			qti_data->play.length_us = test_duration_ms * USEC_PER_MSEC;
+			qti_data->play.vmax_mv = test_vmax_mv;
+			qti_data->config.vmax_mv = test_vmax_mv;
+			qti_data->config.play_rate_us = test_play_rate_us;
+
 	printk("[vibrator] %s :  length = %dus, vmax_mv=%d \n",__func__,
 		qti_data->play.length_us, qti_data->play.vmax_mv);
 
@@ -349,8 +353,12 @@ static ssize_t qpnp_haptics_store_duration(struct device *dev,
 
 	printk("[vibrator] %s : vibrator_on !!! \n",__func__);
 	rc = qti_haptics_playback(qti_data->input_dev, 0, 1);
-	rc = qti_haptics_config_vmax(qti_data, qti_data->play.vmax_mv);
-
+			//rc = qti_haptics_config_vmax(qti_data, qti_data->play.vmax_mv);
+			break;
+		default:
+			printk("[vibrator] %s : unsupport  command %d!! \n",__func__,val);
+			break;
+	}
 	return count;
 }
 
@@ -358,9 +366,12 @@ static ssize_t qpnp_haptics_store_duration(struct device *dev,
 static struct device_attribute vibrator_attrs[] = {
 	__ATTR(vibrator_on, S_IRUGO|S_IWUSR, vibrator_on_show, vibrator_on_store),
 	__ATTR(state, S_IRUGO|S_IWUSR, qpnp_haptics_show_state, qpnp_haptics_store_state),
-	__ATTR(duration, S_IRUGO|S_IWUSR, qpnp_haptics_show_duration,
-		qpnp_haptics_store_duration),
 };
+
+static int twm_sys_enable;
+module_param_named(
+	haptics_twm, twm_sys_enable, int, 0600
+);
 
 static inline bool is_secure(u8 addr)
 {
@@ -1185,6 +1196,24 @@ static void qti_haptics_set_gain(struct input_dev *dev, u16 gain)
 	qti_haptics_config_vmax(chip, play->vmax_mv);
 }
 
+static int qti_haptics_twm_config(struct qti_hap_chip *chip)
+{
+	int rc, i;
+
+	for (i = 0; i < ARRAY_SIZE(twm_ext_cfg); i++) {
+		rc = qti_haptics_write(chip, twm_ext_cfg[i].addr,
+					&twm_ext_cfg[i].value, 1);
+		if (rc < 0) {
+			dev_err(chip->dev, "Haptics TWM config failed, rc=%d\n",
+				rc);
+			return rc;
+		}
+	}
+	pr_debug("Enabled haptics for TWM mode\n");
+
+	return 0;
+}
+
 static int qti_haptics_hw_init(struct qti_hap_chip *chip)
 {
 	struct qti_hap_config *config = &chip->config;
@@ -1339,6 +1368,21 @@ static void verify_brake_setting(struct qti_hap_effect *effect)
 	effect->brake_en = (val != 0);
 }
 
+static int twm_notifier_cb(struct notifier_block *nb,
+			unsigned long action, void *data)
+{
+	struct qti_hap_chip *chip = container_of(nb,
+				struct qti_hap_chip, twm_nb);
+
+	if (action != PMIC_TWM_CLEAR &&
+			action != PMIC_TWM_ENABLE)
+		pr_debug("Unsupported option %lu\n", action);
+	else
+		chip->twm_state = (u8)action;
+
+	return NOTIFY_OK;
+}
+
 static int qti_haptics_parse_dt(struct qti_hap_chip *chip)
 {
 	struct qti_hap_config *config = &chip->config;
@@ -1393,6 +1437,9 @@ static int qti_haptics_parse_dt(struct qti_hap_chip *chip)
 	if (!rc)
 		config->play_rate_us = (tmp >= HAP_PLAY_RATE_US_MAX) ?
 			HAP_PLAY_RATE_US_MAX : tmp;
+
+	chip->haptics_ext_pin_twm = of_property_read_bool(node,
+					"qcom,haptics-ext-pin-twm");
 
 	if (of_find_property(node, "qcom,external-waveform-source", NULL)) {
 		if (!of_property_read_string(node,
@@ -2150,6 +2197,11 @@ static int qti_haptics_probe(struct platform_device *pdev)
 		return rc;
 	}
 
+	chip->twm_nb.notifier_call = twm_notifier_cb;
+	rc = qpnp_misc_twm_notifier_register(&chip->twm_nb);
+	if (rc < 0)
+		pr_err("Failed to register twm_notifier_cb rc=%d\n", rc);
+
 	hrtimer_init(&chip->stop_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 	chip->stop_timer.function = qti_hap_stop_timer;
 	hrtimer_init(&chip->hap_disable_timer, CLOCK_MONOTONIC,
@@ -2218,6 +2270,7 @@ sysfs_fail:
 destroy_ff:
 	mutex_destroy(&chip->param_lock);
 	input_ff_destroy(chip->input_dev);
+	qpnp_misc_twm_notifier_unregister(&chip->twm_nb);
 	return rc;
 }
 
@@ -2230,6 +2283,7 @@ static int qti_haptics_remove(struct platform_device *pdev)
 #endif
 	mutex_destroy(&chip->param_lock);
 	input_ff_destroy(chip->input_dev);
+	qpnp_misc_twm_notifier_unregister(&chip->twm_nb);
 	dev_set_drvdata(chip->dev, NULL);
 
 	return 0;
@@ -2239,6 +2293,7 @@ static void qti_haptics_shutdown(struct platform_device *pdev)
 {
 	struct qti_hap_chip *chip = dev_get_drvdata(&pdev->dev);
 	int rc;
+	bool enable_haptics_twm;
 
 	dev_dbg(chip->dev, "Shutdown!\n");
 
@@ -2252,6 +2307,14 @@ static void qti_haptics_shutdown(struct platform_device *pdev)
 			return;
 		}
 		chip->vdd_enabled = false;
+	}
+
+	enable_haptics_twm = chip->haptics_ext_pin_twm && twm_sys_enable;
+
+	if (chip->twm_state == PMIC_TWM_ENABLE && enable_haptics_twm) {
+		rc = qti_haptics_twm_config(chip);
+		if (rc < 0)
+			pr_err("Haptics TWM config failed rc=%d\n", rc);
 	}
 }
 

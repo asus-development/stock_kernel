@@ -456,9 +456,9 @@ static void store_temperature(struct thermal_zone_device *tz, int temp)
 	tz->temperature = temp;
 	mutex_unlock(&tz->lock);
 	
-	if (tz->id==68){ /* pa-therm1 */
+	if (tz->id==75){ /* pa-therm1 */
 		G_pa_therm1_temp = temp;
-	}else if (tz->id==67){ /* skin-therm */
+	}else if (tz->id==74){ /* skin-therm */
 		G_skin_therm_temp = temp;
 	}
 	
@@ -479,7 +479,9 @@ static void update_temperature(struct thermal_zone_device *tz)
 	ret = thermal_zone_get_temp(tz, &temp);
 	if (ret) {
 		if (ret != -EAGAIN){
+			/* ASUS BSP Clay: remove ambigous log when thermal is stable +++ */
 			//dev_warn(&tz->device,	 "failed to read out thermal zone (%d)\n", ret);
+			/* ASUS BSP Clay: remove ambigous log when thermal is stable --- */
 		}
 		return;
 	}
@@ -1452,7 +1454,7 @@ void thermal_zone_device_unregister(struct thermal_zone_device *tz)
 
 	mutex_unlock(&thermal_list_lock);
 
-	thermal_zone_device_set_polling(NULL, tz, 0);
+	cancel_delayed_work_sync(&tz->poll_queue);
 
 	thermal_set_governor(tz, NULL);
 

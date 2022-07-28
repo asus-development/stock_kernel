@@ -17,6 +17,8 @@
 #include <uapi/linux/kernel.h>
 #include <linux/asusdebug.h>
 
+#define FORCE_RAMDUMP_FEATURE 1
+
 enum DEVICE_HWID
 {
        HW_REV_INVALID = -1,
@@ -98,8 +100,6 @@ extern enum DEVICE_DDRID g_ASUS_ddrID;
 extern int permissive_enable;
 // ASUS_BSP --- get permissive status
 
-#define FORCE_RAMDUMP_FEATURE 1
-
 #define USHRT_MAX	((u16)(~0U))
 #define SHRT_MAX	((s16)(USHRT_MAX>>1))
 #define SHRT_MIN	((s16)(-SHRT_MAX - 1))
@@ -156,8 +156,8 @@ extern int permissive_enable;
 
 #define u64_to_user_ptr(x) (		\
 {					\
-	typecheck(u64, x);		\
-	(void __user *)(uintptr_t)x;	\
+	typecheck(u64, (x));		\
+	(void __user *)(uintptr_t)(x);	\
 }					\
 )
 
@@ -185,7 +185,8 @@ extern int permissive_enable;
 #define DIV_ROUND_DOWN_ULL(ll, d) \
 	({ unsigned long long _tmp = (ll); do_div(_tmp, d); _tmp; })
 
-#define DIV_ROUND_UP_ULL(ll, d)		DIV_ROUND_DOWN_ULL((ll) + (d) - 1, (d))
+#define DIV_ROUND_UP_ULL(ll, d) \
+	DIV_ROUND_DOWN_ULL((unsigned long long)(ll) + (d) - 1, (d))
 
 #if BITS_PER_LONG == 32
 # define DIV_ROUND_UP_SECTOR_T(ll,d) DIV_ROUND_UP_ULL(ll, d)

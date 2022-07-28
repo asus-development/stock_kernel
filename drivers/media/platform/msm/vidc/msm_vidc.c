@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2019, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2020, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -1228,6 +1228,8 @@ static inline int start_streaming(struct msm_vidc_inst *inst)
 		__func__, inst->batch.enable ? "enabled" : "disabled",
 		inst, hash32_ptr(inst->session));
 
+	msm_dcvs_try_enable(inst);
+
 	/*
 	 * For seq_changed_insufficient, driver should set session_continue
 	 * to firmware after the following sequence
@@ -1652,6 +1654,7 @@ static int msm_vidc_op_s_ctrl(struct v4l2_ctrl *ctrl)
 
 	int rc = 0, c = 0;
 	struct msm_vidc_inst *inst;
+	const char *ctrl_name = NULL;
 
 	if (!ctrl) {
 		dprintk(VIDC_ERR, "%s invalid parameters for ctrl\n", __func__);
@@ -1675,9 +1678,12 @@ static int msm_vidc_op_s_ctrl(struct v4l2_ctrl *ctrl)
 			}
 		}
 	}
-	if (rc)
+	if (rc) {
+		ctrl_name = v4l2_ctrl_get_name(ctrl->id);
 		dprintk(VIDC_ERR, "Failed setting control: Inst = %pK (%s)\n",
-				inst, v4l2_ctrl_get_name(ctrl->id));
+			inst, ctrl_name ? ctrl_name : "Invalid ctrl");
+	}
+
 	return rc;
 }
 static int try_get_ctrl(struct msm_vidc_inst *inst, struct v4l2_ctrl *ctrl)
@@ -1907,6 +1913,7 @@ void *msm_vidc_open(int core_id, int session_type)
 	inst->profile = V4L2_MPEG_VIDEO_H264_PROFILE_BASELINE;
 	inst->level = V4L2_MPEG_VIDEO_H264_LEVEL_1_0;
 	inst->entropy_mode = V4L2_MPEG_VIDEO_H264_ENTROPY_MODE_CAVLC;
+	inst->max_filled_length = 0;
 	for (i = SESSION_MSG_INDEX(SESSION_MSG_START);
 		i <= SESSION_MSG_INDEX(SESSION_MSG_END); i++) {
 		init_completion(&inst->completions[i]);
@@ -1955,7 +1962,6 @@ void *msm_vidc_open(int core_id, int session_type)
 		goto fail_init;
 	}
 
-	msm_dcvs_try_enable(inst);
 	if (msm_comm_check_for_inst_overload(core)) {
 		dprintk(VIDC_ERR,
 			"Instance count reached Max limit, rejecting session");
@@ -2061,6 +2067,8 @@ static void msm_vidc_cleanup_instance(struct msm_vidc_inst *inst)
 	mutex_unlock(&inst->registeredbufs.lock);
 
 	del_timer(&inst->batch_timer);
+
+	cancel_work_sync(&inst->batch_work);
 
 	msm_comm_free_freq_table(inst);
 

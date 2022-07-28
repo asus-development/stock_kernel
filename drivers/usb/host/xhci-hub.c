@@ -626,35 +626,32 @@ static void xhci_port_set_test_mode(struct xhci_hcd *xhci,
 		xhci_start(xhci);
 }
 
-static int xhci_enter_test_mode(struct usb_hcd *hcd, struct xhci_hcd *xhci,
+static int xhci_enter_test_mode(struct xhci_hcd *xhci,
 				u16 test_mode, u16 wIndex, unsigned long *flags)
 {
-	int retval, slot_id;
+	int i, retval;
 
 	/* Disable all Device Slots */
 	xhci_dbg(xhci, "Disable all slots\n");
-	slot_id = xhci_find_slot_id_by_port(hcd, xhci,
-		wIndex + 1);
 	spin_unlock_irqrestore(&xhci->lock, *flags);
-	//for (i = 1; i <= HCS_MAX_SLOTS(xhci->hcs_params1); i++) {
-		//if (!xhci->devs[i])
-			//continue;
+	for (i = 1; i <= HCS_MAX_SLOTS(xhci->hcs_params1); i++) {
+		if (!xhci->devs[i])
+			continue;
 
-		//retval = xhci_disable_slot(xhci, i);
-		//if (retval)
-			//xhci_err(xhci, "Failed to disable slot %d, %d. Enter test mode anyway\n",
-				 //i, retval);
-	//}
-	xhci_stop_device(xhci, slot_id, 1);
+		retval = xhci_disable_slot(xhci, i);
+		if (retval)
+			xhci_err(xhci, "Failed to disable slot %d, %d. Enter test mode anyway\n",
+				 i, retval);
+	}
 	spin_lock_irqsave(&xhci->lock, *flags);
 	/* Put all ports to the Disable state by clear PP */
 	xhci_dbg(xhci, "Disable all port (PP = 0)\n");
 	/* Power off USB3 ports*/
-	//for (i = 0; i < xhci->num_usb3_ports; i++)
-		//xhci_set_port_power(xhci, xhci->shared_hcd, i, false, flags);
+	for (i = 0; i < xhci->num_usb3_ports; i++)
+		xhci_set_port_power(xhci, xhci->shared_hcd, i, false, flags);
 	/* Power off USB2 ports*/
-	//for (i = 0; i < xhci->num_usb2_ports; i++)
-		//xhci_set_port_power(xhci, xhci->main_hcd, i, false, flags);
+	for (i = 0; i < xhci->num_usb2_ports; i++)
+		xhci_set_port_power(xhci, xhci->main_hcd, i, false, flags);
 	/* Stop the controller */
 	xhci_dbg(xhci, "Stop controller\n");
 	retval = xhci_halt(xhci);
@@ -859,7 +856,7 @@ static u32 xhci_get_port_status(struct usb_hcd *hcd,
 		struct xhci_bus_state *bus_state,
 		__le32 __iomem **port_array,
 		u16 wIndex, u32 raw_port_status,
-		unsigned long flags)
+		unsigned long *flags)
 	__releases(&xhci->lock)
 	__acquires(&xhci->lock)
 {
@@ -891,6 +888,14 @@ static u32 xhci_get_port_status(struct usb_hcd *hcd,
 			status |= USB_PORT_STAT_C_BH_RESET << 16;
 		if ((raw_port_status & PORT_CEC))
 			status |= USB_PORT_STAT_C_CONFIG_ERROR << 16;
+
+		/* USB3 remote wake resume signaling completed */
+		if (bus_state->port_remote_wakeup & (1 << wIndex) &&
+		    (raw_port_status & PORT_PLS_MASK) != XDEV_RESUME &&
+		    (raw_port_status & PORT_PLS_MASK) != XDEV_RECOVERY) {
+			bus_state->port_remote_wakeup &= ~(1 << wIndex);
+			usb_hcd_end_port_resume(&hcd->self, wIndex);
+		}
 	}
 
 	if (hcd->speed < HCD_USB3) {
@@ -941,12 +946,12 @@ static u32 xhci_get_port_status(struct usb_hcd *hcd,
 			xhci_set_link_state(xhci, port_array, wIndex,
 					XDEV_U0);
 
-			spin_unlock_irqrestore(&xhci->lock, flags);
+			spin_unlock_irqrestore(&xhci->lock, *flags);
 			time_left = wait_for_completion_timeout(
 					&bus_state->rexit_done[wIndex],
 					msecs_to_jiffies(
 						XHCI_MAX_REXIT_TIMEOUT_MS));
-			spin_lock_irqsave(&xhci->lock, flags);
+			spin_lock_irqsave(&xhci->lock, *flags);
 
 			if (time_left) {
 				usb_phy_powerdown(hcd->usb3_phy);
@@ -1240,7 +1245,7 @@ int xhci_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue,
 			break;
 		}
 		status = xhci_get_port_status(hcd, bus_state, port_array,
-				wIndex, temp, flags);
+				wIndex, temp, &flags);
 		if (status == 0xffffffff)
 			goto error;
 
@@ -1260,7 +1265,7 @@ int xhci_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue,
 			}
 			port_li = readl(port_array[wIndex] + PORTLI);
 			status = xhci_get_ext_port_status(temp, port_li);
-			put_unaligned_le32(cpu_to_le32(status), &buf[4]);
+			put_unaligned_le32(status, &buf[4]);
 		}
 		break;
 	case SetPortFeature:
@@ -1481,7 +1486,7 @@ int xhci_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue,
 			}
 			if (test_mode > TEST_FORCE_EN || test_mode < TEST_J)
 				goto error;
-			retval = xhci_enter_test_mode(hcd, xhci, test_mode, wIndex,
+			retval = xhci_enter_test_mode(xhci, test_mode, wIndex,
 						      &flags);
 			break;
 		default:

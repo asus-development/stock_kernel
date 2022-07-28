@@ -30,7 +30,6 @@
 extern int asus_lcd_bridge_enable;
 extern bool asus_igc_need_commit;  //depends on #if ASUS_KERNEL_IGC_TABLE
 extern int display_early_init;
-extern bool display_on_trig_by_early;
 
 int asus_lcd_crtc_id = -1;
 
@@ -90,7 +89,7 @@ static int msm_drm_notifier_call_chain(unsigned long val, void *v)
  * atomically mark them as pending update
  */
 static int start_atomic(struct msm_drm_private *priv, uint32_t crtc_mask,
-		uint32_t plane_mask)
+			uint32_t plane_mask)
 {
 	int ret;
 
@@ -111,7 +110,7 @@ static int start_atomic(struct msm_drm_private *priv, uint32_t crtc_mask,
 /* clear specified crtcs (no longer pending update)
  */
 static void end_atomic(struct msm_drm_private *priv, uint32_t crtc_mask,
-		uint32_t plane_mask)
+			uint32_t plane_mask)
 {
 	spin_lock(&priv->pending_crtcs_event.lock);
 	DBG("end: %08x", crtc_mask);
@@ -138,6 +137,7 @@ static inline bool _msm_seamless_for_crtc(struct drm_atomic_state *state,
 
 	if (msm_is_mode_seamless(&crtc_state->mode) ||
 		msm_is_mode_seamless_vrr(&crtc_state->adjusted_mode) ||
+		msm_is_mode_seamless_poms(&crtc_state->adjusted_mode) ||
 		msm_is_mode_seamless_dyn_clk(&crtc_state->adjusted_mode))
 		return true;
 
@@ -529,10 +529,6 @@ static void msm_atomic_helper_commit_modeset_enables(struct drm_device *dev,
 		if (connector->state->crtc) {
 			if (connector->state->crtc->index == asus_lcd_crtc_id) {
 				asus_lcd_bridge_enable = 1;
-
-				/* reset early on flag because this is real call */
-				printk("[Display] reset early on flag\n");
-				display_on_trig_by_early = false;
 			}
 		}
 

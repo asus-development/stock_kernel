@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -21,6 +21,7 @@
 #include "sde_connector.h"
 #include "dsi_drm.h"
 #include "sde_trace.h"
+#include "sde_encoder.h"
 
 #define to_dsi_bridge(x)     container_of((x), struct dsi_bridge, base)
 #define to_dsi_state(x)      container_of((x), struct dsi_connector_state, base)
@@ -31,7 +32,6 @@
 #define DEFAULT_PANEL_PREFILL_LINES	25
 
 extern int fts_ts_resume(void);
-bool dsi_on = false;
 
 static struct dsi_display_mode_priv_info default_priv_info = {
 	.panel_jitter_numer = DEFAULT_PANEL_JITTER_NUMERATOR,
@@ -83,6 +83,8 @@ static void convert_to_dsi_mode(const struct drm_display_mode *drm_mode,
 		dsi_mode->dsi_mode_flags |= DSI_MODE_FLAG_DMS;
 	if (msm_is_mode_seamless_vrr(drm_mode))
 		dsi_mode->dsi_mode_flags |= DSI_MODE_FLAG_VRR;
+	if (msm_is_mode_seamless_poms(drm_mode))
+		dsi_mode->dsi_mode_flags |= DSI_MODE_FLAG_POMS;
 	if (msm_is_mode_seamless_dyn_clk(drm_mode))
 		dsi_mode->dsi_mode_flags |= DSI_MODE_FLAG_DYN_CLK;
 
@@ -90,6 +92,11 @@ static void convert_to_dsi_mode(const struct drm_display_mode *drm_mode,
 			!!(drm_mode->flags & DRM_MODE_FLAG_PHSYNC);
 	dsi_mode->timing.v_sync_polarity =
 			!!(drm_mode->flags & DRM_MODE_FLAG_PVSYNC);
+
+	if (drm_mode->flags & DRM_MODE_FLAG_VID_MODE_PANEL)
+		dsi_mode->panel_mode = DSI_OP_VIDEO_MODE;
+	if (drm_mode->flags & DRM_MODE_FLAG_CMD_MODE_PANEL)
+		dsi_mode->panel_mode = DSI_OP_CMD_MODE;
 }
 
 void dsi_convert_to_drm_mode(const struct dsi_display_mode *dsi_mode,
@@ -127,6 +134,8 @@ void dsi_convert_to_drm_mode(const struct dsi_display_mode *dsi_mode,
 		drm_mode->private_flags |= MSM_MODE_FLAG_SEAMLESS_DMS;
 	if (dsi_mode->dsi_mode_flags & DSI_MODE_FLAG_VRR)
 		drm_mode->private_flags |= MSM_MODE_FLAG_SEAMLESS_VRR;
+	if (dsi_mode->dsi_mode_flags & DSI_MODE_FLAG_POMS)
+		drm_mode->private_flags |= MSM_MODE_FLAG_SEAMLESS_POMS;
 	if (dsi_mode->dsi_mode_flags & DSI_MODE_FLAG_DYN_CLK)
 		drm_mode->private_flags |= MSM_MODE_FLAG_SEAMLESS_DYN_CLK;
 
@@ -134,6 +143,11 @@ void dsi_convert_to_drm_mode(const struct dsi_display_mode *dsi_mode,
 		drm_mode->flags |= DRM_MODE_FLAG_PHSYNC;
 	if (dsi_mode->timing.v_sync_polarity)
 		drm_mode->flags |= DRM_MODE_FLAG_PVSYNC;
+
+	if (dsi_mode->panel_mode == DSI_OP_VIDEO_MODE)
+		drm_mode->flags |= DRM_MODE_FLAG_VID_MODE_PANEL;
+	if (dsi_mode->panel_mode == DSI_OP_CMD_MODE)
+		drm_mode->flags |= DRM_MODE_FLAG_CMD_MODE_PANEL;
 
 	/* set mode name */
 	snprintf(drm_mode->name, DRM_DISPLAY_MODE_LEN, "%dx%dx%dx%d",
@@ -156,17 +170,17 @@ static int dsi_bridge_attach(struct drm_bridge *bridge)
 
 }
 
+bool dsi_on = false;
+
 static void dsi_bridge_pre_enable(struct drm_bridge *bridge)
 {
 	int rc = 0;
 	struct dsi_bridge *c_bridge = to_dsi_bridge(bridge);
 
-	if (dsi_on) {
-		printk("[Display] DSI still on skip dsi_bridge_pre_enable.\n");
+	printk("[Display] dsi_bridge_pre_enable !!!\n");
+
+	if (dsi_on)
 		return;
-	} else {
-		printk("[Display] dsi_bridge_pre_enable\n");
-	}
 
 	if (!bridge) {
 		pr_err("Invalid params\n");
@@ -196,14 +210,15 @@ static void dsi_bridge_pre_enable(struct drm_bridge *bridge)
 		return;
 	}
 
-	SDE_ATRACE_BEGIN("dsi_bridge_pre_enable");
+	SDE_ATRACE_BEGIN("dsi_display_prepare");
 	rc = dsi_display_prepare(c_bridge->display);
 	if (rc) {
 		pr_err("[%d] DSI display prepare failed, rc=%d\n",
 		       c_bridge->id, rc);
-		SDE_ATRACE_END("dsi_bridge_pre_enable");
+		SDE_ATRACE_END("dsi_display_prepare");
 		return;
 	}
+	SDE_ATRACE_END("dsi_display_prepare");
 
 	SDE_ATRACE_BEGIN("dsi_display_enable");
 	rc = dsi_display_enable(c_bridge->display);
@@ -213,7 +228,6 @@ static void dsi_bridge_pre_enable(struct drm_bridge *bridge)
 		(void)dsi_display_unprepare(c_bridge->display);
 	}
 	SDE_ATRACE_END("dsi_display_enable");
-	SDE_ATRACE_END("dsi_bridge_pre_enable");
 	fts_ts_resume();
 	rc = dsi_display_splash_res_cleanup(c_bridge->display);
 	if (rc)
@@ -227,12 +241,8 @@ static void dsi_bridge_enable(struct drm_bridge *bridge)
 	struct dsi_bridge *c_bridge = to_dsi_bridge(bridge);
 	struct dsi_display *display;
 
-	if (dsi_on) {
-		printk("[Display] DSI still on skip dsi_bridge_enable.\n");
+	if (dsi_on)
 		return;
-	} else {
-		printk("[Display] dsi_bridge_enable\n");
-	}
 
 	if (!bridge) {
 		pr_err("Invalid params\n");
@@ -252,10 +262,16 @@ static void dsi_bridge_enable(struct drm_bridge *bridge)
 		pr_err("[%d] DSI display post enabled failed, rc=%d\n",
 		       c_bridge->id, rc);
 
-	if (display && display->drm_conn)
+	if (display && display->drm_conn) {
 		sde_connector_helper_bridge_enable(display->drm_conn);
 
+		if (c_bridge->dsi_mode.dsi_mode_flags & DSI_MODE_FLAG_POMS)
+			sde_connector_schedule_status_work(display->drm_conn,
+				true);
+	}
+
 	dsi_on = true;
+
 }
 
 static void dsi_bridge_disable(struct drm_bridge *bridge)
@@ -263,6 +279,7 @@ static void dsi_bridge_disable(struct drm_bridge *bridge)
 	int rc = 0;
 	struct dsi_display *display;
 	struct dsi_bridge *c_bridge = to_dsi_bridge(bridge);
+	int private_flags;
 
 	if (!dsi_on)
 		return;
@@ -274,8 +291,14 @@ static void dsi_bridge_disable(struct drm_bridge *bridge)
 
 	display = c_bridge->display;
 
-	if (display && display->drm_conn)
+	private_flags =
+		bridge->encoder->crtc->state->adjusted_mode.private_flags;
+
+	if (display && display->drm_conn) {
+		display->poms_pending =
+			private_flags & MSM_MODE_FLAG_SEAMLESS_POMS;
 		sde_connector_helper_bridge_disable(display->drm_conn);
+	}
 
 	rc = dsi_display_pre_disable(c_bridge->display);
 	if (rc) {
@@ -353,6 +376,8 @@ static bool dsi_bridge_mode_fixup(struct drm_bridge *bridge,
 	struct dsi_display_mode dsi_mode, cur_dsi_mode, *panel_dsi_mode;
 	struct drm_display_mode cur_mode;
 	struct drm_crtc_state *crtc_state;
+	bool clone_mode = false;
+	struct drm_encoder *encoder;
 
 	crtc_state = container_of(mode, struct drm_crtc_state, mode);
 
@@ -417,15 +442,43 @@ static bool dsi_bridge_mode_fixup(struct drm_bridge *bridge,
 			return false;
 		}
 
+		drm_for_each_encoder(encoder, crtc_state->crtc->dev) {
+			if (encoder->crtc != crtc_state->crtc)
+				continue;
+
+			if (sde_encoder_in_clone_mode(encoder))
+				clone_mode = true;
+		}
+
 		cur_mode = crtc_state->crtc->mode;
+
+		/* No panel mode switch when drm pipeline is changing */
+		if ((dsi_mode.panel_mode != cur_dsi_mode.panel_mode) &&
+			(!(dsi_mode.dsi_mode_flags & DSI_MODE_FLAG_VRR)) &&
+			(crtc_state->enable ==
+				crtc_state->crtc->state->enable))
+			dsi_mode.dsi_mode_flags |= DSI_MODE_FLAG_POMS;
 
 		/* No DMS/VRR when drm pipeline is changing */
 		if (!drm_mode_equal(&cur_mode, adjusted_mode) &&
 			(!(dsi_mode.dsi_mode_flags & DSI_MODE_FLAG_VRR)) &&
+			(!(dsi_mode.dsi_mode_flags & DSI_MODE_FLAG_POMS)) &&
 			(!(dsi_mode.dsi_mode_flags & DSI_MODE_FLAG_DYN_CLK)) &&
 			(!crtc_state->active_changed ||
 			 display->is_cont_splash_enabled))
 			dsi_mode.dsi_mode_flags |= DSI_MODE_FLAG_DMS;
+
+		/* Reject seemless transition when active/connectors changed.*/
+		if ((crtc_state->active_changed ||
+			(crtc_state->connectors_changed && clone_mode)) &&
+			((dsi_mode.dsi_mode_flags & DSI_MODE_FLAG_VRR) ||
+			(dsi_mode.dsi_mode_flags & DSI_MODE_FLAG_DYN_CLK))) {
+			pr_err("seamless on active/conn(%d/%d) changed 0x%x\n",
+				crtc_state->active_changed,
+				crtc_state->connectors_changed,
+				dsi_mode.dsi_mode_flags);
+			return false;
+		}
 	}
 
 	/* convert back to drm mode, propagating the private info & flags */
@@ -488,6 +541,7 @@ int dsi_conn_get_mode_info(struct drm_connector *connector,
 	mode_info->clk_rate = dsi_drm_find_bit_clk_rate(display, drm_mode);
 	mode_info->mdp_transfer_time_us =
 		dsi_mode.priv_info->mdp_transfer_time_us;
+	mode_info->overlap_pixels = dsi_mode.priv_info->overlap_pixels;
 
 	memcpy(&mode_info->topology, &dsi_mode.priv_info->topology,
 			sizeof(struct msm_display_topology));
@@ -910,6 +964,17 @@ int dsi_conn_pre_kickoff(struct drm_connector *connector,
 	return dsi_display_pre_kickoff(connector, display, params);
 }
 
+int dsi_conn_prepare_commit(void *display,
+		struct msm_display_conn_params *params)
+{
+	if (!display || !params) {
+		pr_err("Invalid params\n");
+		return -EINVAL;
+	}
+
+	return dsi_display_pre_commit(display, params);
+}
+
 void dsi_conn_enable_event(struct drm_connector *connector,
 		uint32_t event_idx, bool enable, void *display)
 {
@@ -924,7 +989,8 @@ void dsi_conn_enable_event(struct drm_connector *connector,
 			event_idx, &event_info, enable);
 }
 
-int dsi_conn_post_kickoff(struct drm_connector *connector)
+int dsi_conn_post_kickoff(struct drm_connector *connector,
+	struct msm_display_conn_params *params)
 {
 	struct drm_encoder *encoder;
 	struct dsi_bridge *c_bridge;
@@ -932,6 +998,7 @@ int dsi_conn_post_kickoff(struct drm_connector *connector)
 	struct dsi_display *display;
 	struct dsi_display_ctrl *m_ctrl, *ctrl;
 	int i, rc = 0;
+	bool enable;
 
 	if (!connector || !connector->state) {
 		pr_err("invalid connector or connector state");
@@ -977,83 +1044,36 @@ int dsi_conn_post_kickoff(struct drm_connector *connector)
 	/* ensure dynamic clk switch flag is reset */
 	c_bridge->dsi_mode.dsi_mode_flags &= ~DSI_MODE_FLAG_DYN_CLK;
 
+	if (params->qsync_update) {
+		enable = (params->qsync_mode > 0) ? true : false;
+		display_for_each_ctrl(i, display) {
+			dsi_ctrl_setup_avr(display->ctrl[i].ctrl, enable);
+		}
+	}
+
 	return 0;
 }
 
 struct drm_bridge *bridge4pm;
-extern struct mutex dsi_op_mutex;
 int display_early_init = 0;
-bool display_on_trig_by_early = false;
 
-extern int dsi_clk_examine_validity(void *client, enum dsi_clk_type clk, bool suspend_fix);
-void dsi_suspend_clock_check(struct drm_bridge *bridge)
+void dsi_suspend (void)
 {
-	struct dsi_display *display;
-	struct dsi_bridge *c_bridge = to_dsi_bridge(bridge);
-
-	if (!bridge) {
-		pr_err("[Display] Invalid params\n");
-		return;
-	}
-
-	display = c_bridge->display;
-
-	dsi_clk_examine_validity(display->dsi_clk_handle,
-			DSI_CORE_CLK, true /* fix suspend state */);
-}
-
-void dsi_suspend(void)
-{
-	printk("[Display] dsi_suspend++\n");
-	mutex_lock(&dsi_op_mutex);
-
-	/*
-	 * check the DSI core clock status only is DSI is already turned off
-	 */
-	if (!dsi_on)
-		dsi_suspend_clock_check(bridge4pm);
-
-	/*
-	 * if display is trigger on by early on
-	 * when suspend called before the actual system has called
-	 * then we should turned off display here
-	 */
-	if (!display_on_trig_by_early)
-		goto exit;
-	else
-		printk("[Display] disable bridge in suspend state.\n");
-
-	display_on_trig_by_early = false;
-	//dsi_bridge_disable(bridge4pm);
-	//dsi_bridge_post_disable(bridge4pm);
+	pr_err("dsi_suspend++\n");
+	dsi_bridge_disable(bridge4pm);
+	dsi_bridge_post_disable(bridge4pm);
 	display_early_init = 0;
-
-exit:
-	mutex_unlock(&dsi_op_mutex);
-	printk("[Display] dsi_suspend--\n");
+	pr_err("dsi_suspend--\n");
 }
 EXPORT_SYMBOL(dsi_suspend);
 
-void dsi_resume(void)
+void dsi_resume (void)
 {
-	printk("[Display] dsi_resume ++\n");
-	mutex_lock(&dsi_op_mutex);
-
-	/* last time is early init and not panel off yet */
-	if (display_early_init) {
-		printk("[Display] cancel early on, last time flag is still on.\n");
-	} else if (dsi_on) {
-		printk("[Display] cancel early on, panel may still on.\n");
-	} else {
-		/* mark display early on here, reset this flag by system calling */
-		display_on_trig_by_early = true;
-		display_early_init = 1;
-		dsi_bridge_pre_enable(bridge4pm);
-		dsi_bridge_enable(bridge4pm);
-	}
-
-	mutex_unlock(&dsi_op_mutex);
-	printk("[Display] dsi_resume --\n");
+	pr_err("dsi_resume++\n");
+	display_early_init = 1;
+	dsi_bridge_pre_enable(bridge4pm);
+	dsi_bridge_enable(bridge4pm);
+	pr_err("dsi_resume---\n");
 }
 EXPORT_SYMBOL(dsi_resume);
 

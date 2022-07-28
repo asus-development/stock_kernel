@@ -1493,7 +1493,6 @@ static const struct file_operations ufsdbg_dump_string_desc = {
 	.read		= seq_read,
 };
 //ASUS_BSP Deeo : dump all desc ---
-
 static int ufsdbg_power_mode_show(struct seq_file *file, void *data)
 {
 	struct ufs_hba *hba = (struct ufs_hba *)file->private;

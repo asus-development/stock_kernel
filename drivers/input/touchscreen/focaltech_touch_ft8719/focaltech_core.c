@@ -1755,7 +1755,7 @@ static int fts_i2c_suspend(struct device *dev)
 static void focal_ReadGesture_work(struct work_struct *work) {
     u8 state;
 
-    mutex_lock(&fts_data->resume_mutex);
+    mutex_lock(&fts_data->report_mutex);
     if(gesture_flag) {
         printk("[touch][fts]%s : start! \n", __func__);
         if ((fts_data->dclick_mode_eable == 1) | (fts_data->swipeup_mode_eable == 1) | (fts_data->gesture_mode_eable == 1)) {
@@ -1771,7 +1771,7 @@ static void focal_ReadGesture_work(struct work_struct *work) {
     } else {
         printk("[touch][fts]%s : gesture mode off\n", __func__);
     }
-    mutex_unlock(&fts_data->resume_mutex);
+    mutex_unlock(&fts_data->report_mutex);
 }
 
 static int fts_resume(struct device *dev)

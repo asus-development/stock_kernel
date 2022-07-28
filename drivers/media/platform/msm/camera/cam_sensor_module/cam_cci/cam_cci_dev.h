@@ -26,6 +26,7 @@
 #include <linux/timer.h>
 #include <linux/kernel.h>
 #include <linux/platform_device.h>
+#include <linux/semaphore.h>
 #include <media/cam_sensor.h>
 #include <media/v4l2-event.h>
 #include <media/v4l2-ioctl.h>
@@ -147,6 +148,10 @@ struct cam_cci_master_info {
 	struct completion report_q[NUM_QUEUES];
 	atomic_t done_pending[NUM_QUEUES];
 	spinlock_t lock_q[NUM_QUEUES];
+	spinlock_t freq_cnt;
+	struct semaphore master_sem;
+	bool is_first_req;
+	uint16_t freq_ref_cnt;
 };
 
 struct cam_cci_clk_params_t {
@@ -317,6 +322,6 @@ static inline struct v4l2_subdev *cam_cci_get_subdev(int cci_dev_index)
 #endif
 
 #define VIDIOC_MSM_CCI_CFG \
-	_IOWR('V', BASE_VIDIOC_PRIVATE + 23, struct cam_cci_ctrl *)
+	_IOWR('V', BASE_VIDIOC_PRIVATE + 23, struct cam_cci_ctrl)
 
 #endif /* _CAM_CCI_DEV_H_ */
