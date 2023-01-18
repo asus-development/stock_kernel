@@ -10,5 +10,5 @@
 # Normal rules (sorted alphabetically)
 #
 /scripts/dtc/include-prefixes/
-scripts/dtc/include-prefixes/
+scripts/dtc/include-prefixes
 
