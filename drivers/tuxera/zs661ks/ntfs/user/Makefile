@@ -1,6 +1,6 @@
 # Rules for making Tuxera NTFS.
 #
-# Copyright (c) 2009-2019 Anton Altaparmakov & Tuxera Inc. All rights reserved.
+# Copyright (c) 2009-2021 Anton Altaparmakov & Tuxera Inc. All rights reserved.
 #
 # You can set various options for the NTFS driver here:
 
@@ -20,6 +20,12 @@ EXTRA_CFLAGS += -DUTS_VERSION=\"$(SMP)\ $(PREEMPT)\ UNKNOWN\"
 endif
 
 obj-m += $(CONFIG_NTFS_NAME).o
+.%.o.cmd:
+	@touch $@
+
+ifneq ($(wildcard $(KBUILD_EXTMOD)/Module.dependencies),)
+KBUILD_EXTRA_SYMBOLS += $(KBUILD_EXTMOD)/Module.dependencies
+endif
 
 $(CONFIG_NTFS_NAME)-objs :=	aops.o \
 				attr_list.o \
@@ -44,6 +50,7 @@ $(CONFIG_NTFS_NAME)-objs :=	aops.o \
 				secure.o \
 				super.o \
 				sysctl.o \
+				tfs-os-api-compat.o \
 				tuts.o \
 				unistr.o \
 				usnjrnl.o \
